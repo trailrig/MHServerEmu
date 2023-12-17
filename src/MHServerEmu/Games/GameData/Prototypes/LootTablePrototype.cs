@@ -1,10 +1,12 @@
-﻿using MHServerEmu.Games.Loot;
+﻿using MHServerEmu.Games.GameData.Calligraphy;
+using MHServerEmu.Games.Loot;
 
 namespace MHServerEmu.Games.GameData.Prototypes
 {
     #region Enums
 
-    public enum LootEventType
+    [AssetEnum]
+    public enum LootEventType   // Loot/LootDropEventType.type
     {
         None = 0,
         OnInteractedWith = 3,
@@ -18,13 +20,14 @@ namespace MHServerEmu.Games.GameData.Prototypes
         OnDamagedForPctHealth = 9,
     }
 
-    public enum PickMethod
+    [AssetEnum]
+    public enum LootActionType
     {
-        PickWeight,
-        PickWeightTryAll,
-        PickAll,
+        Spawn = 1,
+        Give = 2
     }
 
+    [AssetEnum]
     public enum CharacterFilterType
     {
         None = 0,
@@ -32,6 +35,7 @@ namespace MHServerEmu.Games.GameData.Prototypes
         DropUnownedAvatarOnly = 2,
     }
 
+    [AssetEnum]
     public enum PlayerScope
     {
         CurrentRecipientOnly = 0,
@@ -41,6 +45,7 @@ namespace MHServerEmu.Games.GameData.Prototypes
         Guild = 4,
     }
 
+    [AssetEnum]
     public enum AffixPosition
     {
         None = 0,
@@ -65,7 +70,8 @@ namespace MHServerEmu.Games.GameData.Prototypes
         Socket3 = 19,
     }
 
-    public enum WeekdayEnum
+    [AssetEnum]
+    public enum Weekday
     {
         Sunday = 0,
         Monday = 1,
@@ -77,7 +83,8 @@ namespace MHServerEmu.Games.GameData.Prototypes
         All = 7,
     }
 
-    public enum Binding
+    [AssetEnum]
+    public enum LootBindingType
     {
         None = 0,
         TradeRestricted = 1,
@@ -89,7 +96,7 @@ namespace MHServerEmu.Games.GameData.Prototypes
 
     public class LootTablePrototype : LootDropPrototype
     {
-        public PickMethodType PickMethod { get; set; }
+        public PickMethod PickMethod { get; set; }
         public float NoDropPercent { get; set; }
         public LootNodePrototype[] Choices { get; set; }
         public ulong MissionLogRewardsText { get; set; }
@@ -153,7 +160,7 @@ namespace MHServerEmu.Games.GameData.Prototypes
     public class LootCooldownRolloverTimeEntryPrototype : Prototype
     {
         public float WallClockTime24Hr { get; set; }
-        public WeekdayEnum WallClockTimeDay { get; set; }
+        public Weekday WallClockTimeDay { get; set; }
     }
 
     public class LootCooldownChannelPrototype : Prototype
@@ -442,7 +449,7 @@ namespace MHServerEmu.Games.GameData.Prototypes
 
     public class LootRollRequireWeekdayPrototype : LootRollModifierPrototype
     {
-        public WeekdayEnum[] Choices { get; set; }
+        public Weekday[] Choices { get; set; }
     }
 
     public class LootRollIgnoreCooldownPrototype : LootRollModifierPrototype
@@ -490,7 +497,7 @@ namespace MHServerEmu.Games.GameData.Prototypes
 
     public class LootMutateBindingPrototype : LootMutationPrototype
     {
-        public Binding Binding { get; set; }
+        public LootBindingType Binding { get; set; }
     }
 
     public class LootClampLevelPrototype : LootMutationPrototype

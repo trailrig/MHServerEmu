@@ -1,20 +1,32 @@
 ﻿using MHServerEmu.Common.Extensions;
+using MHServerEmu.Common.Logging;
 
 namespace MHServerEmu.Games.GameData.Calligraphy
 {
     public class AssetType
     {
-        // An AssetType is basically an enum for all assets of a certain type. An AssetValue is a reference to an asset.
-        // All AssetTypes and AssetValues have their own unique ids. Some assets are literally representations of enums.
+        // An AssetType is a collection of references to values, generally either actual assets or enums.
+        // All AssetTypes and AssetValues have their own unique ids. AssetValue ids are actually string ids.
 
-        private readonly AssetTypeGuid _guid;
+        // Enum asset types are bound to symbolic enums they represent during game database initialization:
+        // DataDirectory.LoadCalligraphyDataFramework() -> PrototypeClassManager.BindAssetTypesToEnums() -> AssetDirectory.BindAssetTypes() -> AssetType.BindEnum()
+
+        private static readonly Logger Logger = LogManager.CreateLogger();
+
         private readonly AssetValue[] _assets;
 
-        public int MaxEnumValue { get => _assets.Length - 1; }  // Is this correct?
+        private Type _enumBinding;                          // Type of a symbolic enum to bind to
+        private Dictionary<int, int> _symbolicLookupDict;   // Symbolic enum value -> asset index
+        private bool _enumerated;
+
+        public AssetTypeId Id { get; }
+        public AssetTypeGuid Guid { get; }
+        public int MaxEnumValue { get; private set; }
 
         public AssetType(byte[] data, AssetDirectory assetDirectory, AssetTypeId assetTypeId, AssetTypeGuid assetTypeGuid)
         {
-            _guid = assetTypeGuid;
+            Id = assetTypeId;
+            Guid = assetTypeGuid;
 
             using (MemoryStream stream = new(data))
             using (BinaryReader reader = new(stream))
@@ -35,12 +47,90 @@ namespace MHServerEmu.Games.GameData.Calligraphy
             }
         }
 
-        public AssetValue GetAssetValue(StringId id)
+        /// <summary>
+        /// Sets symbolic enum binding for this asset type.
+        /// </summary>
+        public void BindEnum(Type enumBinding)
         {
-            return _assets.FirstOrDefault(asset => asset.Id == id);
+            _enumBinding = enumBinding;
+            if (_enumBinding != null) _symbolicLookupDict = new();
+            Enumerate();
         }
 
-        public readonly struct AssetValue
+        /// <summary>
+        /// Gets an asset id from its enum value.
+        /// </summary>
+        public StringId GetAssetRefFromEnum(int enumValue)
+        {
+            if (_enumerated == false)
+            {
+                Logger.Warn("Failed to get asset ref from enum: not enumerated");
+                return StringId.Invalid;
+            }
+
+            var assetValue = GetAssetValueFromEnum(enumValue);
+            if (assetValue == null) return StringId.Invalid;
+            return assetValue.Id;
+        }
+        
+        /// <summary>
+        /// Enumerates this asset type taking symbolic enum binding into account.
+        /// </summary>
+        private void Enumerate()
+        {
+            // Iterate through all assets of this type
+            for (int i = 0; i < _assets.Length; i++)
+            {
+                // Determine enum value
+                int enumValue;
+                if (_enumBinding != null)   // Symbolic enums
+                {
+                    enumValue = (int)Enum.Parse(_enumBinding, GameDatabase.GetAssetName(_assets[i].Id));    // Parse value from enum type
+                    MaxEnumValue = Math.Max(enumValue, MaxEnumValue);                                       // Update max value
+                    _symbolicLookupDict.Add(enumValue, i);                                                  // Add enumValue -> AssetValue index lookup
+                }
+                else                        // Regular enums
+                {
+                    enumValue = i;
+                }
+
+                // Add asset enum lookup to AssetDirectory
+                GameDatabase.DataDirectory.AssetDirectory.AddAssetEnumLookup(_assets[i].Id, enumValue);
+            }
+
+            // Set max enum value for assets not bound to symbolic enums
+            if (_enumBinding == null && _assets.Length > 0)
+                MaxEnumValue = _assets.Length - 1;
+
+            _enumerated = true;
+        }
+
+        /// <summary>
+        /// Gets an <see cref="AssetValue"/> associated with the specified enum value.
+        /// </summary>
+        private AssetValue GetAssetValueFromEnum(int enumValue)
+        {
+            if (_enumerated == false) return null;
+
+            // Symbolic enums
+            if (_enumBinding != null)
+            {
+                if (_symbolicLookupDict.TryGetValue(enumValue, out int index) == false)
+                    return null;
+
+                return _assets[index];
+            }
+                
+            // Regular enums
+            if (enumValue < 0 || enumValue >= _assets.Length) return null;
+
+            return _assets[enumValue];
+        }
+
+        /// <summary>
+        /// A container for references to a specific asset.
+        /// </summary>
+        class AssetValue
         {
             public StringId Id { get; }
             public AssetGuid Guid { get; }

@@ -1,13 +1,19 @@
-﻿namespace MHServerEmu.Games.GameData.Calligraphy
+﻿using MHServerEmu.Common.Logging;
+
+namespace MHServerEmu.Games.GameData.Calligraphy
 {
     /// <summary>
     /// Manages loaded AssetTypes and Assets.
     /// </summary>
     public class AssetDirectory
     {
+        private static readonly Logger Logger = LogManager.CreateLogger();
+
         private readonly Dictionary<AssetTypeId, LoadedAssetTypeRecord> _assetTypeRecordDict = new();   // assetTypeId => LoadedAssetTypeRecord
         private readonly Dictionary<StringId, AssetTypeId> _assetIdToTypeIdDict = new();                // assetId => assetTypeId
         private readonly Dictionary<AssetGuid, StringId> _assetGuidToIdDict = new();                    // assetGuid => assetId
+
+        private readonly Dictionary<StringId, int> _assetIdToEnumValueDict = new();                     // assetId => enumValue
 
         public int AssetTypeCount { get => _assetTypeRecordDict.Count; }
         public int AssetCount { get => _assetGuidToIdDict.Count; }
@@ -42,6 +48,22 @@
         }
 
         /// <summary>
+        /// Finds and returns an asset type by its name.
+        /// </summary>
+        public AssetType GetAssetType(string name)  // Same as AssetDirectory::GetWritableAssetType()
+        {
+            var matches = GameDatabase.SearchAssetTypes(name, DataFileSearchFlags.NoMultipleMatches);
+            if (matches.Any() == false)
+            {
+                Logger.Warn($"Failed to find AssetType by pattern {name}");
+                return null;
+            }
+
+            AssetTypeId id = matches.First();
+            return _assetTypeRecordDict[id].AssetType;
+        }
+
+        /// <summary>
         /// Gets the id of the AssetType that the specified asset belong to.
         /// </summary>
         public AssetTypeId GetAssetTypeId(StringId assetId)
@@ -70,6 +92,37 @@
         {
             _assetIdToTypeIdDict.Add(assetId, assetTypeId);
             _assetGuidToIdDict.Add(assetGuid, assetId);
+        }
+
+        /// <summary>
+        /// Adds a new assetId => enumValue lookup.
+        /// </summary>
+        public void AddAssetEnumLookup(StringId assetId, int enumValue)
+        {
+            _assetIdToEnumValueDict.Add(assetId, enumValue);
+        }
+
+        /// <summary>
+        /// Binds asset types to code enums.
+        /// </summary>
+        public void BindAssetTypes(Dictionary<AssetType, Type> assetEnumBindingDict)
+        {
+            // Iterate through all loaded asset types
+            foreach (var record in _assetTypeRecordDict.Values)
+            {
+                // Bind asset type to enum if it's in the binding dictionary
+                assetEnumBindingDict.TryGetValue(record.AssetType, out Type enumBinding);
+                record.AssetType.BindEnum(enumBinding);
+            }
+        }
+
+        /// <summary>
+        /// Provides an IEnumerable collection of all loaded asset types.
+        /// </summary>
+        public IEnumerable<AssetType> IterateAssetTypes()
+        {
+            foreach (var record in _assetTypeRecordDict.Values)
+                yield return record.AssetType;
         }
 
         /// <summary>

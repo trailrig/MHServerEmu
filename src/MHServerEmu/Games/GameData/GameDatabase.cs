@@ -8,8 +8,25 @@ using MHServerEmu.Games.Properties;
 
 namespace MHServerEmu.Games.GameData
 {
+    [Flags]
+    public enum DataFileSearchFlags
+    {
+        None                = 0,
+        NoMultipleMatches   = 1 << 0,
+        SortMatchesByName   = 1 << 1,
+        ExactMatchesOnly    = 1 << 2,
+        CaseInsensitive     = 1 << 3    // Our custom flag not present in the client
+    }
+
     public static class GameDatabase
     {
+        private enum DataFileSet
+        {
+            Prototype,
+            Blueprint,
+            AssetType
+        }
+
         private static readonly Logger Logger = LogManager.CreateLogger();
 
         private static readonly string PakDirectory = Path.Combine(FileHelper.AssetsDirectory, "GPAK");
@@ -88,7 +105,7 @@ namespace MHServerEmu.Games.GameData
         public static AssetType GetAssetType(AssetTypeId assetTypeId) => DataDirectory.AssetDirectory.GetAssetType(assetTypeId);
         public static Curve GetCurve(CurveId curveId) => DataDirectory.CurveDirectory.GetCurve(curveId);
         public static Blueprint GetBlueprint(BlueprintId blueprintId) => DataDirectory.GetBlueprint(blueprintId);
-        public static T GetPrototype<T>(PrototypeId prototypeId) => DataDirectory.GetPrototype<T>(prototypeId);
+        public static T GetPrototype<T>(PrototypeId prototypeId) where T: Prototype => DataDirectory.GetPrototype<T>(prototypeId);
 
         public static string GetAssetName(StringId assetId) => StringRefManager.GetReferenceName(assetId);
         public static string GetAssetTypeName(AssetTypeId assetTypeId) => AssetTypeRefManager.GetReferenceName(assetTypeId);
@@ -122,6 +139,132 @@ namespace MHServerEmu.Games.GameData
 
             string assetName = GetAssetName(assetId);
             return GetPrototypeRefByName(assetName);
+        }
+
+        #endregion
+
+        #region Search
+
+        // NOTE: This search is based on the original client implementation, but it could be organized better in the future while keeping the same API
+
+        /// <summary>
+        /// Searches for prototypes using specified filters.
+        /// </summary>
+        public static IEnumerable<PrototypeId> SearchPrototypes(string pattern, DataFileSearchFlags searchFlags,
+            BlueprintId parentBlueprintId = BlueprintId.Invalid, Type parentPrototypeClassType = null)
+        {
+            var matches = GetDataFileSearchMatches(DataFileSet.Prototype, pattern, searchFlags, parentBlueprintId, parentPrototypeClassType);
+            return matches.Select(match => (PrototypeId)match);
+        }
+
+        /// <summary>
+        /// Searches for blueprints using specified filters.
+        /// </summary>
+        public static IEnumerable<BlueprintId> SearchBlueprints(string pattern, DataFileSearchFlags searchFlags)
+        {
+            var matches = GetDataFileSearchMatches(DataFileSet.Blueprint, pattern, searchFlags);
+            return matches.Select(match => (BlueprintId)match);
+        }
+
+        public static IEnumerable<AssetTypeId> SearchAssetTypes(string pattern, DataFileSearchFlags searchFlags)
+        {
+            var matches = GetDataFileSearchMatches(DataFileSet.AssetType, pattern, searchFlags);
+            return matches.Select(match => (AssetTypeId)match);
+        }
+
+        private static List<ulong> GetDataFileSearchMatches(DataFileSet set, string pattern, DataFileSearchFlags searchFlags,
+            BlueprintId parentBlueprintId = BlueprintId.Invalid, Type parentPrototypeClassType = null)
+        {
+            List<ulong> matches = new();
+            bool matchAllResults = pattern == "*";
+
+            // Lots of repetitive code down below. TODO: clean it up
+
+            if (set == DataFileSet.Prototype)
+            {
+                // Get prototype iterator, prioritize class type
+                PrototypeIterator iterator = parentPrototypeClassType == null
+                    ? DataDirectory.IteratePrototypesInHierarchy(parentBlueprintId, PrototypeIterateFlags.None)
+                    : DataDirectory.IteratePrototypesInHierarchy(parentPrototypeClassType, PrototypeIterateFlags.None);
+
+                // Iterate
+                foreach (Prototype prototype in iterator)
+                {
+                    PrototypeId prototypeId = prototype.DataRef;
+                    string prototypeName = GetPrototypeName(prototypeId);
+
+                    // Check pattern
+                    if (matchAllResults || CompareName(prototypeName, pattern, searchFlags))
+                    {
+                        // Early return if no multiple matches is requested and there's more than one match
+                        if (matches.Count > 0 && searchFlags.HasFlag(DataFileSearchFlags.NoMultipleMatches))
+                            return null;
+
+                        matches.Add((ulong)prototypeId);
+                    }
+                }
+
+                // Sort matches by name if needed
+                if (searchFlags.HasFlag(DataFileSearchFlags.SortMatchesByName))
+                    matches = matches.OrderBy(match => GetPrototypeName((PrototypeId)match)).ToList();
+            }
+
+            if (set == DataFileSet.Blueprint)
+            {
+                foreach (Blueprint blueprint in DataDirectory.IterateBlueprints())
+                {
+                    BlueprintId blueprintId = blueprint.Id;
+                    string blueprintName = GetBlueprintName(blueprintId);
+
+                    if (matchAllResults || CompareName(blueprintName, pattern, searchFlags))
+                    {
+                        // Early return if no multiple matches is requested and there's more than one match
+                        if (matches.Count > 0 && searchFlags.HasFlag(DataFileSearchFlags.NoMultipleMatches))
+                            return null;
+
+                        matches.Add((ulong)blueprintId);
+                    }
+                }
+
+                // Sort matches by name if needed
+                if (searchFlags.HasFlag(DataFileSearchFlags.SortMatchesByName))
+                    matches = matches.OrderBy(match => GetBlueprintName((BlueprintId)match)).ToList();
+            }
+
+            if (set == DataFileSet.AssetType)
+            {
+                foreach (AssetType assetType in DataDirectory.IterateAssetTypes())
+                {
+                    AssetTypeId assetTypeId = assetType.Id;
+                    string assetTypeName = GetAssetTypeName(assetTypeId);
+
+                    if (matchAllResults || CompareName(assetTypeName, pattern, searchFlags))
+                    {
+                        // Early return if no multiple matches is requested and there's more than one match
+                        if (matches.Count > 0 && searchFlags.HasFlag(DataFileSearchFlags.NoMultipleMatches))
+                            return null;
+
+                        matches.Add((ulong)assetTypeId);
+                    }
+                }
+
+                // Sort matches by name if needed
+                if (searchFlags.HasFlag(DataFileSearchFlags.SortMatchesByName))
+                    matches = matches.OrderBy(match => GetAssetTypeName((AssetTypeId)match)).ToList();
+            }
+
+            return matches;
+        }
+
+        private static bool CompareName(string name, string pattern, DataFileSearchFlags flags)
+        {
+            if (flags.HasFlag(DataFileSearchFlags.ExactMatchesOnly))
+                return name == pattern;
+
+            if (flags.HasFlag(DataFileSearchFlags.CaseInsensitive))
+                return name.Contains(pattern, StringComparison.InvariantCultureIgnoreCase);
+
+            return name.Contains(pattern, StringComparison.InvariantCulture);
         }
 
         #endregion
