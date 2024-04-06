@@ -1,42 +1,31 @@
 # Initial Setup
 
-First you need to get the 1.52.0.1700 client. This is the final released version of Marvel Heroes, If you still have the game in your Steam library, you can download it from there.
+First, you need to get the `1.52.0.1700` game client. This is the final released version of Marvel Heroes, so if you still have the game in your Steam library, you can download it from there. If you do not have the game in your Steam library, you may be able to find an archived copy of it on websites like Archive.org.
 
-*Note: it is also possible to download other versions of the client from Steam. See [Client Versions](./../Client/ClientVersions.md) for details.*
+After you acquire the client, make sure to install .NET Desktop Runtime 6 if you do not have it installed already. You can download it [here](https://dotnet.microsoft.com/en-us/download/dotnet/6.0). Download [this version](https://dotnet.microsoft.com/en-us/download/dotnet/thank-you/runtime-6.0.27-windows-x64-installer) if you are not sure which one to get.
 
-After getting the client, you need to set up a web server to serve SiteConfig.xml and redirect login requests. For this guide we're going to use Apache.
+The following instructions are intended for stable builds of the server. If you feel confident in doing everything yourself, please see [Manual Setup](./ManualSetup.md).
 
-1. Download Apache 2.4.58 Win64 [here](https://www.apachelounge.com/download/). You can use any other version of Apache you prefer, as long as it has OpenSSL support enabled.
+## Setting Up
 
-2. Extract the ```Apache24``` folder in the archive to the root directory on any drive (e.g. ```C:\Apache24```).
+1. Download the latest [MHServerEmu stable build](https://github.com/Crypto137/MHServerEmu/releases/latest) and extract it.
 
-3. Open `Apache24\conf\httpd.conf` with any text editor and uncomment (by removing the # symbol) the following six lines: `LoadModule rewrite_module modules/mod_rewrite.so`, `LoadModule proxy_module modules/mod_proxy.so`,  `LoadModule proxy_http_module modules/mod_proxy_http.so`, `Include conf/extra/httpd-ssl.conf` `LoadModule ssl_module modules/mod_ssl.so`, and `LoadModule socache_shmcb_module modules/mod_socache_shmcb.so`. Make sure you remove only the # symbol and not the entire line!
+2. Run the included `SetupSorcererSupreme` tool and point it to your Marvel Heroes game files. You can find them by right clicking on the game in your Steam library and choosing `Manage` -> `Browse local files`.
 
-4. Open ```Apache24\conf\extra\httpd-ssl.conf``` with any text editor, find the `<VirtualHost _default_:443>` section, and add the following two lines to it:
-   `RewriteEngine on` and `RewriteRule ^/AuthServer(.*) http://%{HTTP_HOST}:8080$1 [P]`.
+## Running the Server
 
-5. Put [server.crt](./../../assets/ssl/server.crt) and [server.crt](./../../assets/ssl/server.key) provided in this repository in `Apache24\conf`. Alternatively, you can generate your own OpenSSL certificate.
+1. Run the included `StartServers.bat` file and wait for MHServerEmu to initialize.
 
-6. Put [SiteConfig.xml](./../../assets/SiteConfig.xml) provided in this repository in ```Apache24\htdocs```.
+2. (Optional) Open http://localhost:8080/AccountManagement/Create and create an account. Note: this link is going to work only when the servers are running.
 
-7. Open ```ClientConfig.xml``` located in ```Marvel Heroes\Data\Configs``` with any text editor and replace the ```SiteConfigLocation``` value with ```localhost/SiteConfig.xml```. The line should look like this: `<str name="SiteConfigLocation" value="localhost/SiteConfig.xml" />`.
+3. Run `StartClient.bat` and log in with your created account OR run `StartClientAutoLogin.bat` to play with a default account.
 
-8. Build MHServerEmu with Visual Studio or any other tool you prefer. You can download Visual Studio Community [here](https://visualstudio.microsoft.com/vs/community/). If this is your first time building a .NET project, you can find instructions for Visual Studio [here](https://learn.microsoft.com/en-us/visualstudio/ide/building-and-cleaning-projects-and-solutions-in-visual-studio?view=vs-2022).
+4. When you are done, run the `StopServers.bat` file to stop the servers.
 
-9. Copy `Calligraphy.sip` and `mu_cdata.sip` located in `Marvel Heroes\Data\Game` to `MHServerEmu\Assets\GPAK`. Make sure to copy these files to where your compiled emulator is (e.g. `src\MHServerEmu\bin\x64\Debug\net6.0\Assets\GPAK`), and not to one of the source directories.
+## Updating MHServerEmu
 
-Now you can actually start everything and get in-game.
+In most cases you can update MHServerEmu simply by downloading the [latest nightly build](https://nightly.link/Crypto137/MHServerEmu/workflows/nightly-release-windows-x64/master?preview) and extracting it into the `MHServerEmu` directory, overwriting all files.
 
-1. Start Apache by running ```Apache24\bin\httpd.exe```.
+Overwriting all files is going to wipe your account data: if you would like to keep it, make sure to back up and restore the `MHServerEmu\Data\Account.db` file. Please keep in mind that the server is still early in development, and major changes are going to require account wipes.
 
-2. Start MHServerEmu.
-
-3. Launch the game.
-
-4. Log in with any email and password.
-
-If everything works correctly, the server should display client connection information.
-
-*Note: you can launch the game without Steam by running MarvelHeroesOmega.exe with the following arguments: -robocopy -nosteam.*
-
-You can customize how the emulator functions by editing the `Config.ini` file. See [Advanced Setup](./AdvancedSetup.md) for more advanced setup topics.
+In some cases migrating to a new version may require additional steps. These are going to be posted on our [Discord server](https://discord.gg/hjR8Bj52t3) in the #news channel.

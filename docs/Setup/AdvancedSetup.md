@@ -2,9 +2,7 @@
 
 Below are some of the more advanced setup topics you might be interested in. For first-time setup instructions please see [Initial Setup](./InitialSetup.md).
 
-## Enabling Accounts
-
-By default the `BypassAuth` option in `Config.ini` is enabled. This makes the server accept any login information and always use a stub account, which is not ideal for anything beyond basic single player testing. To be able to save data and have multiple clients able to connect you need to disable `BypassAuth` and set up accounts.
+## Managing Accounts
 
 You can create and manage accounts by using ! commands in the server console or the in-game chat window. Here are some commands to get you started:
 
@@ -20,27 +18,45 @@ For a more in-depth list of commands see [Server Commands](./../ServerEmu/Server
 
 To allow remote clients to connect to your server you need to set up your Apache to function as a reverse proxy server.
 
-1. Add `ProxyPass /AuthServer http://localhost:8080` and `ProxyPassReverse /AuthServer http://localhost:8080` to `httpd-ssl.conf`, similar to how you have added Rewrite lines during the initial setup.
+1. Remove `RewriteEngine on` and `RewriteRule ^/AuthServer(.*) http://%{HTTP_HOST}:8080$1 [P]` from `httpd-ssl.conf`.
 
-2. Create a copy of your `SiteConfig.xml` in `Apache24\htdocs` and replace the `AuthServerAddress` value in it with your server's **public** IP address or domain name.
+2. Add `ProxyPass /AuthServer http://localhost:8080` and `ProxyPassReverse /AuthServer http://localhost:8080` to the `<VirtualHost _default_:443>` section in `httpd-ssl.conf`.
 
-3. Replace `BindIP` in `Config.ini` with your **local** IP address or `0.0.0.0`. This has to be an IP address and not domain name.
+3. Create a copy of your `SiteConfig.xml` in `Apache24\htdocs` and replace the `AuthServerAddress` value in it with your server's externally accessible IP address or domain name. For LAN this is something like `192.168.x.x`, and for hosting on the Internet it is going to be your server's IP address or a domain name pointing to it.
 
-4. Replace `PublicAddress` in `Config.ini` with your **public** address (this can be an IP address or a domain name, like in `SiteConfig.xml`).
+4. Replace `BindIP` in `Config.ini` with your local IP address or `0.0.0.0`. This has to be an IP address and not a domain name.
 
-After doing the above steps you can connect to the server remotely by either editing `ClientConfig.xml` on the client's machine or launching the game with the following parameter: `-siteconfigurl=yourserveraddress.com/SiteConfig.xml`. To connect to the server from the same machine it is being hosted on you need to use the original `SiteConfig.xml` that points to `localhost`.
+5. Replace `PublicAddress` in `Config.ini` with your externally accessible address (this can be an IP address or a domain name, like in `SiteConfig.xml`).
+
+After doing the above steps you can connect to the server remotely by either editing `ClientConfig.xml` on the client's machine, or launching the game with the following parameter: `-siteconfigurl=yourserveraddress.com/SiteConfig.xml`. To connect to the server from the same machine it is being hosted on, you need to use the original `SiteConfig.xml` that points to `localhost`.
 
 Please keep in mind that MHServerEmu is experimental software still heavily in development, and hosting a publicly available server on the Internet brings with it potential security risks.
+
+## Running on Linux
+
+### Server
+
+1. Replace the `SQLite.Interop.dll` file in [MHServerEmu.DatabaseAccess](./../../src/MHServerEmu.DatabaseAccess/) with `SQLite.Interop.Linux.dll`.
+
+2. Build the server code for Linux.
+
+### Client
+
+The version `1.52.0.1700` of the client currently has a compatibility issue with Wine/Proton that prevents it from encrypting session tokens, which is required for the authentication process. There is a workaround to bypass this issue:
+
+1. Use [MHPatcher](https://github.com/Crypto137/MHPatcher) to apply `Bypass Session Token Encryption Error by FF_Lowthor` to the 64-bit version of `MarvelHeroesOmega.exe`. You can also do it manually with a hex editor: change `75` to `EB` at `0x019B317E`.
+
+2. Set `BypassAuth` to true in the server's `Config.ini` file.
 
 ## Setting Up In-Game Store and News
 
 The client uses an embedded web browser for some of its UI panels. MHServerEmu provides some options that allow you to make use of this feature.
 
-1. Copy the [mhgame_store_home](./../../assets/store/mhgame_store_home/) folder provided in this repository to `Apache24\htdocs`.
+1. Copy the [store](https://github.com/Crypto137/MHServerEmuWebAssets/tree/master/store) folder provided in the [MHServerEmuWebAssets](https://github.com/Crypto137/MHServerEmuWebAssets) repository to `Apache24\htdocs`.
 
 2. Set `OverrideStoreUrls` in `Config.ini` to `true`.
 
-3. Set `StoreHomePageUrl` in `Config.ini` to `http://localhost/mhgame_store_home`.
+3. Set `StoreHomePageUrl` in `Config.ini` to `http://localhost/store`.
 
 Restart the server, and you should be able to see an example store home page when you open the in-game store. You can set other pages by editing various URL options in `Config.ini` (e.g. `NewsUrl` to change the content of the news window). For more information on the embedded browser see [Embedded Browser](./../Web/EmbeddedBrowser.md).
 

@@ -6,7 +6,9 @@ If you would like to ask questions or get up to date information, please feel fr
 
 If this is your first time using MHServerEmu, you may be interested in this.
 
-- [Initial Setup](./Setup/InitialSetup.md) - step by step instructions for setting up the server emulator for the first time.
+- [Initial Setup](./Setup/InitialSetup.md) - stable build setup instructions.
+
+- [Manual Setup](./Setup/ManualSetup.md) - manual setup instructions for advanced users.
 
 - [Advanced Setup](./Setup/AdvancedSetup.md) - advanced setup instructions (enabling accounts, remote connections, etc.).
 
@@ -15,6 +17,12 @@ If this is your first time using MHServerEmu, you may be interested in this.
 MHServerEmu-specific topics.
 
 - [Server Commands](./ServerEmu/ServerCommands.md) - a list of available server commands.
+
+## General
+
+Topics concerning the game in general.
+
+- [Glossary](./Glossary.md) - a list of terms used by the game internally.
 
 ## Networking
 
