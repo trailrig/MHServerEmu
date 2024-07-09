@@ -1,0 +1,43 @@
+Version 0.2.0 - June 22, 2024
+
+Major New Features
+ - Overhauled the area of interest system: clients are now notified of what is happening on the server in real time, allowing you to, for example, see enemies respawn.
+ - Implemented multiplayer: you can now see other players logged into the same server in-game and interact with them.
+ - Avatar swapping now happens in-game with no loading screens.
+ - Implemented the inventory system: you can pick up and drop items to the ground, stack them, equip and unequip them, see items equipped on nearby avatars. Currently there is no inventory persistence, so inventories are wiped when you log out or transfer between regions.
+ - Enemies now drop loot. Currently the loot system uses a placeholder loot table for all enemies, and there is no affix generation. The placeholder loot table includes crafting elements, relics, artifacts, rings, runeword glyphs, costumes, and pets.
+ - Implemented the navi system: the server now has a representation of the world geometry, which we currently use for basic collision detection when spawning enemies and dropping items. In the future this will also be used for systems such as pathfinding and AI.
+ - Implemented physics and locomotion systems, which makes it possible to synchronize world entity movement between clients.
+
+Other Changes
+ - Overhauled server architecture: the server is now divided into replaceable services.
+ - Improved handling of situations when multiple clients are attempting to use the same account.
+ - Implemented saving and loading of the default account data used when authentication bypass is enabled.
+ - Overhauled archive serialization and protobuf message parsing.
+ - Overhauled game simulation timing and event scheduling.
+ - Implemented in-engine cutscene playback for prologue regions.
+ - Implemented default configuration values, allowing the server to start with options missing in the Config.ini.
+ - Region cleanup and entity respawn intervals are now configurable.
+ - Implemented various new chat commands. Here are some of them:
+    - !item give [pattern] – searches for an item prototype matching the provided pattern, generates an item and adds it to the player’s inventory.
+    - !item drop [pattern] – searches for an item prototype matching the provided pattern, generates an item and drops it to the ground.
+    - !region warp [pattern] – searches for a region matching the provided pattern and teleports the player there.
+    - !server broadcast [text] – broadcasts a notification to all players on the server.
+ - Implemented world entity power collections, which makes it possible to add and remove powers available for specific world entities to use.
+ - Implemented world entity condition collections, which makes it possible to add and remove condition effects (buffs and debuffs) to/from world entities.
+ - Implemented various game data tables that are used to simplify access to some of the data contained in the game database.
+ - Numerous other small optimizations and improvements.
+
+--
+
+Version 0.1.0 - March 10, 2024
+
+Features
+ - Client-server network protocol implementation.
+ - Basic multiplayer functionality: handling multiple clients, remote connections, chat.
+ - Implementation of the proprietary static game data management system used by the game.
+ - Fully-featured implementation of DRAG (dynamic random area generator).
+ - Spawning of entities, including NPCs, enemies, and interactable objects, across the entire game.
+ - Hero and costume selection.
+ - Rudimentary implementation of hero powers.
+ - Account system with simple web API for registering new accounts.

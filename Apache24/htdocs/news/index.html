@@ -1,0 +1,215 @@
+<!doctype html>
+<html lang="en">
+
+	<head>
+  <meta charset="utf-8">
+
+  <title>MHServerEmu Guide</title>
+
+  <meta name="description" content="A framework for easily creating beautiful presentations using HTML">
+  <meta name="author" content="Hakim El Hattab">
+
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+
+  <link rel="stylesheet" href="css/reveal.css">
+  <link rel="stylesheet" href="css/theme/black_custom.css" id="theme">
+
+  <!-- Theme used for syntax highlighting of code -->
+  <link rel="stylesheet" href="lib/css/zenburn.css">
+
+  <!-- Printing and PDF exports -->
+  <script>
+    var link = document.createElement( 'link' );
+    link.rel = 'stylesheet';
+    link.type = 'text/css';
+    link.href = window.location.search.match( /print-pdf/gi ) ? 'css/print/pdf.css' : 'css/print/paper.css';
+    document.getElementsByTagName( 'head' )[0].appendChild( link );
+  </script>
+
+  <!--[if lt IE 9]>
+  <script src="lib/js/html5shiv.js"></script>
+  <![endif]-->
+  
+  <!-- Global site tag (gtag.js) - Google Analytics -->
+  <script async src="https://www.googletagmanager.com/gtag/js?id=UA-61981167-2"></script>
+  <script>
+    window.dataLayer = window.dataLayer || [];
+    function gtag(){dataLayer.push(arguments);}
+    gtag('js', new Date());
+
+    gtag('config', 'UA-61981167-2');
+  </script>
+
+
+</head>
+
+
+	<body>
+
+        		<div class="reveal">
+			<div class="slides">
+				<section>
+				
+				
+
+				
+					
+
+					
+
+					<section><h2 id="welcome-to-mhserveremu-020">Welcome to MHServerEmu 0.2.0!</h2>
+
+<p>Welcome to the second official release of MHServerEmu! Over the past few months we have been working hard on various core features of the game, including server-side game simulation, multiplayer, and loot.</p>
+
+<p>In this panel you will find an overview of what you can check out in this version of MHServerEmu.</p>
+
+<p>Use the navigation buttons in the bottom right corner to browse. You can open this panel again at any time by pressing the news button [N].</p>
+</section>
+				
+					
+
+					
+						
+						</section><section>
+					
+
+					<section><h2 id="features">Features</h2>
+
+<ul>
+  <li>
+    <p>You can play as any hero and use most of their powers.</p>
+  </li>
+  <li>
+    <p>You can change your costume by “buying” it in the <a onclick="myApi.OpenCatalogToItem('CostumesPage', '')">in-game store</a>.</p>
+  </li>
+  <li>
+    <p>Currently there is no character progression. Only your costume selections and action bar powers are saved between sessions.</p>
+  </li>
+  <li>
+    <p>You can explore the entire game, and all regions are randomly generated. Regions refresh periodically as long as there are no players in them.</p>
+  </li>
+  <li>
+    <p>You can encounter enemies and deal damage to them, but most combat mechanics are not yet implemented. Enemies drop loot.</p>
+  </li>
+  <li>
+    <p>You can see and interact with other players, as long as all of you are connected to the same server.</p>
+  </li>
+</ul>
+</section>
+				
+					
+
+					
+						
+						</section><section>
+					
+
+					<section><h2 id="new-in-version-020">New In Version 0.2.0</h2>
+
+<ul>
+  <li>
+    <p>Implemented multiplayer: you can now see other players logged into the same server in-game and interact with them.</p>
+  </li>
+  <li>
+    <p>Hero swapping now happens in-game with no loading screens.</p>
+  </li>
+  <li>
+    <p>Implemented the inventory system: you can pick up and drop items to the ground, stack them, equip and unequip them, see items equipped on nearby heroes.</p>
+  </li>
+  <li>
+    <p>Enemies now drop loot. Currently the loot system uses a placeholder loot table for all enemies, and there is no affix generation.</p>
+  </li>
+  <li>
+    <p>Implemented the navi system: the server now has a representation of the world geometry used for collision detection.</p>
+  </li>
+  <li>
+    <p>Implemented physics and locomotion systems, which makes it possible to synchronize world entity movement between clients.</p>
+  </li>
+</ul>
+</section>
+				
+					
+
+					
+						
+						</section><section>
+					
+
+					<section><h2 id="server-commands">Server Commands</h2>
+
+<p>You can type <strong>!commands</strong> in the chat window to see a list of available server commands. Here are some commands that may be useful:</p>
+
+<p><strong>!tower</strong> - Teleports you to Avengers Towers.</p>
+
+<p><strong>!region warp [pattern]</strong> - Teleports you to the region matching the provided search pattern.</p>
+
+<p><strong>!item drop [pattern]</strong> / <strong>!item give [pattern]</strong> - Drops or adds to your inventory the item that matches the provided search pattern.</p>
+
+<p><strong>!tp x100 y100 z100</strong> - Teleports you within your current region. Replace numbers with coordinates you want to go to.</p>
+
+<p><strong>!achievement unlock 28</strong> - Unlocks the specified achievement.</p>
+
+</section>
+				
+					
+
+					
+						
+						</section><section>
+					
+
+					<section><p>You can get the latest version of MHServerEmu on <a onclick="myApi.OpenExternalBrowserFromJS('https://github.com/Crypto137/MHServerEmu')">GitHub</a>.</p>
+
+<p>If you have any questions or suggestions, be sure to let us know on <a onclick="myApi.OpenExternalBrowserFromJS('https://discord.gg/hjR8Bj52t3')">Discord</a>.</p>
+
+<p>We regularly post progress reports on our <a onclick="myApi.OpenExternalBrowserFromJS('https://crypto137.github.io/MHServerEmu/')">blog</a>.</p>
+
+<p>Thank you for your interest and support. Have fun!</p>
+</section>
+				
+			</div>
+		</div>
+
+
+
+		<script src="lib/js/head.min.js"></script>
+<script src="js/reveal.js"></script>
+
+<script>
+
+    // More info https://github.com/hakimel/reveal.js#configuration
+    Reveal.initialize({
+		width: 1280,
+		height: 960,
+        controls: true,
+        progress: true,
+        history: false,
+        center: true,
+		keyboard: false,
+		mouseWheel: false,
+		touch: false,
+
+        transition: 'fade', // none/fade/slide/convex/concave/zoom
+		transitionSpeed: 'fast',
+		backgroundTransition: 'none',
+		viewDistance: 2,
+
+        // More info https://github.com/hakimel/reveal.js#dependencies
+        dependencies: [
+            { src: 'lib/js/classList.js', condition: function() { return !document.body.classList; } },
+            { src: 'plugin/markdown/marked.js', condition: function() { return !!document.querySelector( '[data-markdown]' ); } },
+            { src: 'plugin/markdown/markdown.js', condition: function() { return !!document.querySelector( '[data-markdown]' ); } },
+            //{ src: 'plugin/highlight/highlight.js', async: true, callback: function() { hljs.initHighlightingOnLoad(); } },
+            //{ src: 'plugin/zoom-js/zoom.js', async: true },
+            //{ src: 'plugin/notes/notes.js', async: true }
+        ]
+    });
+
+</script>
+
+
+	</body>
+</html>
