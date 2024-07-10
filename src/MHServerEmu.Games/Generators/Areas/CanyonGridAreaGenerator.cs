@@ -1,4 +1,5 @@
-﻿using MHServerEmu.Core.Collisions;
+﻿using MHServerEmu.Core.Collections;
+using MHServerEmu.Core.Collisions;
 using MHServerEmu.Core.Extensions;
 using MHServerEmu.Core.System.Random;
 using MHServerEmu.Core.VectorMath;
@@ -141,7 +142,7 @@ namespace MHServerEmu.Games.Generators.Areas
             return 0;
         }
 
-        public override bool GetPossibleConnections(ConnectionList connections, Segment segment)
+        public override bool GetPossibleConnections(ConnectionList connections, in Segment segment)
         {
             connections.Clear();
 

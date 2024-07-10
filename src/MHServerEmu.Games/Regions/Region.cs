@@ -1,22 +1,29 @@
-﻿using Gazillion;
+﻿using System.Diagnostics;
+using Gazillion;
 using Google.ProtocolBuffers;
+using MHServerEmu.Core.Collections;
+using MHServerEmu.Core.Collisions;
 using MHServerEmu.Core.Extensions;
+using MHServerEmu.Core.Helpers;
 using MHServerEmu.Core.Logging;
+using MHServerEmu.Core.System;
+using MHServerEmu.Core.VectorMath;
+using MHServerEmu.Games.Behavior;
 using MHServerEmu.Games.Entities;
+using MHServerEmu.Games.Entities.Avatars;
+using MHServerEmu.Games.Entities.Locomotion;
+using MHServerEmu.Games.Events;
 using MHServerEmu.Games.GameData;
 using MHServerEmu.Games.GameData.Prototypes;
-using MHServerEmu.Games.Generators.Population;
 using MHServerEmu.Games.Generators;
+using MHServerEmu.Games.Generators.Population;
 using MHServerEmu.Games.Generators.Regions;
-using MHServerEmu.Games.Missions;
-using MHServerEmu.Frontend;
-using MHServerEmu.Core.Network;
-using MHServerEmu.Core.System;
-using MHServerEmu.Core.Collisions;
-using MHServerEmu.Core.VectorMath;
-using MHServerEmu.Games.Network;
 using MHServerEmu.Games.MetaGames;
+using MHServerEmu.Games.Missions;
 using MHServerEmu.Games.Navi;
+using MHServerEmu.Games.Network;
+using MHServerEmu.Games.Properties;
+using MHServerEmu.Games.Regions.ObjectiveGraphs;
 
 namespace MHServerEmu.Games.Regions
 {
@@ -39,6 +46,20 @@ namespace MHServerEmu.Games.Regions
         public bool GenerateLog;
     }
 
+    [Flags]
+    public enum PositionCheckFlags
+    {
+        None = 0,
+        CanBeBlockedEntity = 1 << 0,
+        CanBeBlockedAvatar = 1 << 1,
+        CanPathTo          = 1 << 2,
+        CanSweepTo         = 1 << 3,
+        CanSweepRadius     = 1 << 4,
+        CanPathToEntities  = 1 << 5,
+        InRadius           = 1 << 6,
+        PreferNoEntity     = 1 << 7,
+    }
+
     public class Region : IMissionManagerOwner
     {
         // Old
@@ -46,6 +67,7 @@ namespace MHServerEmu.Games.Regions
 
         public RegionPrototypeId PrototypeId { get; private set; }   
         public byte[] ArchiveData { get; set; }
+        public bool IsGenerated { get; private set; }
         public CreateRegionParams CreateParams { get; private set; }
 
         // New
@@ -80,7 +102,9 @@ namespace MHServerEmu.Games.Regions
         public PathCache PathCache { get; private set; }
         public SpawnMarkerRegistry SpawnMarkerRegistry { get; private set; }
         public EntityTracker EntityTracker { get; private set; } // Entity tracker
-        public TuningTable Difficulty { get; private set; } // Difficulty table
+
+        private TuningTable _difficulty; // Difficulty table
+        public TuningTable TuningTable { get => _difficulty; }
         public MissionManager MissionManager { get; private set; } // Mission manager
         public EntityRegionSpatialPartition EntitySpatialPartition { get; private set; } // Entity spatial partition
         public CellSpatialPartition CellSpatialPartition { get; private set; } // Cell spatial partition
@@ -89,23 +113,21 @@ namespace MHServerEmu.Games.Regions
         public List<DividedStartLocation> DividedStartLocations { get; } = new();
         public int RegionLevel { get; private set; }
         public IEnumerable<Cell> Cells { get => IterateCellsInVolume(Bound); }
-        public IEnumerable<Entity> Entities { get => Game.EntityManager.GetEntities(this); }
+        public IEnumerable<Entity> Entities { get => Game.EntityManager.IterateEntities(this); }
         public List<ulong> MetaGames { get; private set; } = new();
         public ConnectionNodeList Targets { get; private set; }
         public PopulationManager PopulationManager { get; private set; }
 
-        public Region(RegionPrototypeId prototype, int randomSeed, byte[] archiveData, CreateRegionParams createParams) // Old
-        {
-            Id = IdGenerator.Generate();
+        public Event<EntityDeadGameEvent> EntityDeadEvent = new();
+        public Event<AIBroadcastBlackboardGameEvent> AIBroadcastBlackboardEvent = new();
+        public Event<PlayerInteractGameEvent> PlayerInteractEvent = new();
+        public Event<EntityAggroedGameEvent> EntityAggroedEvent = new();
+        public Event<EntityEnteredMissionHotspotGameEvent> EntityEnteredMissionHotspotEvent = new();
+        public Event<EntityLeftMissionHotspotGameEvent> EntityLeftMissionHotspotEvent = new();
 
-            PrototypeId = prototype;
-            RandomSeed = randomSeed;
-            ArchiveData = archiveData;
-            CreateParams = createParams;
-
-            NaviSystem = new();
-            NaviMesh = new(NaviSystem);
-        }
+        private BitList _collisionIds;
+        private BitList _collisionBits;
+        private List<BitList> _collisionBitList;
 
         public Region(Game game)
         {
@@ -116,6 +138,21 @@ namespace MHServerEmu.Games.Regions
 
             NaviSystem = new();
             NaviMesh = new(NaviSystem);
+
+            _collisionIds = new();
+            _collisionBits = new();
+            _collisionBitList = new();
+            _collisionIds.Resize(256);
+        }
+
+        public void InitEmpty(RegionPrototypeId prototype, int seed) // For test
+        {
+            Id = IdGenerator.Generate();
+            PrototypeId = prototype;
+            RandomSeed = seed;
+            ArchiveData = Array.Empty<byte>();
+            CreateParams = new(10, DifficultyTier.Normal);
+            Bound = Aabb.Zero; 
         }
 
         public bool Initialize(RegionSettings settings)
@@ -157,12 +194,12 @@ namespace MHServerEmu.Games.Regions
             if (globals == null)
                 return Logger.ErrorReturn(false, "Unable to get globals prototype for region initialize");
 
-            Difficulty = new(this);
+            _difficulty = new(this);
 
             RegionDifficultySettingsPrototype difficultySettings = regionProto.GetDifficultySettings();
             if (difficultySettings != null)
             {
-                Difficulty.SetTuningTable(difficultySettings.TuningTable);
+                _difficulty.SetTuningTable(difficultySettings.TuningTable);
 
                 /* if (HasProperty(PropertyEnum.DifficultyIndex))
                        TuningTable.SetDifficultyIndex(GetProperty<int>(PropertyEnum.DifficultyIndex), false);
@@ -218,15 +255,17 @@ namespace MHServerEmu.Games.Regions
             if (regionProto.MetaGames.HasValue())
                 foreach (var metaGameRef in regionProto.MetaGames)
                 {
-                    MetaGame metagame = Game.EntityManager.CreateMetaGame(metaGameRef, Id);
-                    RegisterMetaGame(metagame);
+                    EntitySettings metaSettings = new();
+                    metaSettings.RegionId = Id;
+                    metaSettings.EntityRef = metaGameRef;
+                    MetaGame metagame = Game.EntityManager.CreateEntity(metaSettings) as MetaGame;                    
                 }
 
             if (settings.GenerateAreas)
             {
                 if (GenerateAreas(settings.GenerateLog) == false)
                 {
-                    Logger.Error($"Failed to generate areas for\n  region: {this}\n    seed: {RandomSeed}");
+                    Logger.Warn($"Failed to generate areas for\n  region: {this}\n    seed: {RandomSeed}");
                     return false;
                 }
             }
@@ -278,10 +317,8 @@ namespace MHServerEmu.Games.Regions
 
             */
 
-            Bound ??= new Aabb(Vector3.Zero, Vector3.Zero);
-
             ArchiveData = new byte[] { }; // TODO: Gen ArchiveData
-
+            IsGenerated = true;
             return true;
         }
 
@@ -332,7 +369,7 @@ namespace MHServerEmu.Games.Regions
             return bound;
         }
 
-        public void SetBound(Aabb boundingBox)
+        public void SetBound(in Aabb boundingBox)
         {
             if (boundingBox.Volume <= 0 || (boundingBox.Min == Bound.Min && boundingBox.Max == Bound.Max)) return;
 
@@ -342,7 +379,7 @@ namespace MHServerEmu.Games.Regions
             InitializeSpacialPartition(Bound);
         }
 
-        private bool InitializeSpacialPartition(Aabb bound)
+        private bool InitializeSpacialPartition(in Aabb bound)
         {
             if (EntitySpatialPartition != null || CellSpatialPartition != null) return false;
 
@@ -354,6 +391,7 @@ namespace MHServerEmu.Games.Regions
                     PartitionCell(cellItr.Value, PartitionContext.Insert);
 
             SpawnMarkerRegistry.InitializeSpacialPartition(bound);
+            PopulationManager.InitializeSpacialPartition(bound);
 
             return true;
         }
@@ -392,9 +430,16 @@ namespace MHServerEmu.Games.Regions
                         && GenerateNaviMesh()
                         && GenerateHelper(regionGenerator, GenerateFlag.PathCollection);
             // BuildObjectiveGraph()
-            if (success) success &= GenerateMissionPopulation()
+
+            if (success)
+            {
+                Stopwatch stopwatch = Stopwatch.StartNew();
+                success &= GenerateMissionPopulation()
                         && GenerateHelper(regionGenerator, GenerateFlag.Population)
                         && GenerateHelper(regionGenerator, GenerateFlag.PostGenerate);
+                Logger.Debug($"GenerateAreas(): Generated population in {stopwatch.ElapsedMilliseconds} ms");
+            }
+
             return success;
         }
 
@@ -408,7 +453,7 @@ namespace MHServerEmu.Games.Regions
         {
             foreach(var metaGameId in MetaGames)
             {
-                MetaGame metaGame = Game.EntityManager.GetEntityById(metaGameId) as MetaGame;                
+                var metaGame = Game.EntityManager.GetEntity<MetaGame>(metaGameId);                
                 metaGame?.RegistyStates();
             }
             return MissionManager.GenerateMissionPopulation();            
@@ -525,7 +570,7 @@ namespace MHServerEmu.Games.Regions
         }
 
         public bool InsertEntityInSpatialPartition(WorldEntity entity) => EntitySpatialPartition.Insert(entity);
-        public bool UpdateEntityInSpatialPartition(WorldEntity entity) => EntitySpatialPartition.Update(entity);
+        public void UpdateEntityInSpatialPartition(WorldEntity entity) => EntitySpatialPartition.Update(entity);
         public bool RemoveEntityFromSpatialPartition(WorldEntity entity) => EntitySpatialPartition.Remove(entity);
 
         public IEnumerable<WorldEntity> IterateEntitiesInRegion(EntityRegionSPContext context)
@@ -539,6 +584,14 @@ namespace MHServerEmu.Games.Regions
                 return EntitySpatialPartition.IterateElementsInVolume(bound, context);
             else
                 return Enumerable.Empty<WorldEntity>();
+        }
+
+        public IEnumerable<Avatar> IterateAvatarsInVolume(in Sphere bound)
+        {
+            if (EntitySpatialPartition != null)
+                return EntitySpatialPartition.IterateAvatarsInVolume(bound);
+            else
+                return Enumerable.Empty<Avatar>();
         }
 
         public PrototypeId PrototypeDataRef => RegionPrototype.DataRef;
@@ -570,17 +623,17 @@ namespace MHServerEmu.Games.Regions
                 {
                     if (entity is WorldEntity worldEntity)
                     {
-                        /*if (worldEntity.GetRootOwner() is not Player owner)
+                        if (worldEntity.GetRootOwner() is not Player)
                         {
-                            if (worldEntity.IsDestroyed() == false)
+                            if (worldEntity.IsDestroyed == false)
                             {
                                 worldEntity.Destroy();
-                                found = true;
+                                //found = true;
                             }
                         }
-                        else*/
+                        else
                         {
-                            if (worldEntity.IsInWorld())
+                            if (worldEntity.IsInWorld)
                             {
                                 worldEntity.ExitWorld();
                                 // found = true;
@@ -597,8 +650,8 @@ namespace MHServerEmu.Games.Regions
             while (MetaGames.Any())
             {
                 var metaGameId = MetaGames.First();
-                var metaGame = Game.EntityManager.GetEntityById(metaGameId);
-                if (metaGame != null) metaGame.Destroy();
+                var metaGame = Game.EntityManager.GetEntity<Entity>(metaGameId);
+                metaGame?.Destroy();
                 MetaGames.Remove(metaGameId);
             }
 
@@ -623,7 +676,7 @@ namespace MHServerEmu.Games.Regions
              }
             */
 
-            //NaviMesh.Release();
+            NaviMesh.Release();
         }
 
         public ulong GetMatchNumber() => Settings.MatchNumber;
@@ -653,26 +706,26 @@ namespace MHServerEmu.Games.Regions
             return markerFilter == filterRef;
         }
 
-        public IEnumerable<Area> IterateAreas(Aabb bound = null)
+        public IEnumerable<Area> IterateAreas(Aabb? bound = null)
         {
             List<Area> areasList = Areas.Values.ToList();
             foreach (Area area in areasList)
             {
                 //Area area = enumerator.Current.Value;
-                if (bound == null || area.RegionBounds.Intersects(bound))
+                if (bound == null || area.RegionBounds.Intersects(bound.Value))
                     yield return area;
             }
         }
 
-        public bool FindTargetPosition(Vector3 markerPos, Orientation markerRot, RegionConnectionTargetPrototype target)
+        public bool FindTargetPosition(ref Vector3 markerPos, ref Orientation markerRot, RegionConnectionTargetPrototype target)
         {
             Area targetArea;
 
             // fix for AvengerTower
             if (StartArea.PrototypeId == AreaPrototypeId.AvengersTowerHubArea)
             {
-                markerPos.Set(1589.0f, -2.0f, 180.0f);
-                markerRot.Set(3.1415f, 0.0f, 0.0f);
+                markerPos = new (1589.0f, -2.0f, 180.0f);
+                markerRot = new (3.1415f, 0.0f, 0.0f);
                 return true;
             }
 
@@ -685,7 +738,7 @@ namespace MHServerEmu.Games.Regions
             {
                 targetArea = GetArea(areaRef);
                 if (targetArea != null) 
-                    found = targetArea.FindTargetPosition(markerPos, markerRot, target);
+                    found = targetArea.FindTargetPosition(ref markerPos, ref markerRot, target);
             }
 
             // Has the wrong areaRef
@@ -693,7 +746,7 @@ namespace MHServerEmu.Games.Regions
                 foreach (Area area in IterateAreas())
                 {
                     targetArea = area;
-                    if (targetArea.FindTargetPosition(markerPos, markerRot, target))
+                    if (targetArea.FindTargetPosition(ref markerPos, ref markerRot, target))
                         return true;
                 }
 
@@ -701,7 +754,7 @@ namespace MHServerEmu.Games.Regions
             if (found == false)
                 foreach (Cell cell in Cells)
                 {
-                    if (cell.FindTargetPosition(markerPos, markerRot, target))
+                    if (cell.FindTargetPosition(ref markerPos, ref markerRot, target))
                         return true;
                 }
 
@@ -741,30 +794,25 @@ namespace MHServerEmu.Games.Regions
             {
                 if (playerConnection.EntityToTeleport != null) // TODO change teleport without reload Region
                 {
-                    Vector3 position = new(playerConnection.EntityToTeleport.Location.GetPosition());
-                    Orientation orientation = new(playerConnection.EntityToTeleport.Location.GetOrientation());
-                    if (playerConnection.EntityToTeleport.EntityPrototype is TransitionPrototype teleportEntity
-                        && teleportEntity.SpawnOffset > 0) teleportEntity.CalcSpawnOffset(orientation, position);
-                    playerConnection.StartPositon = position;
+                    Vector3 position = playerConnection.EntityToTeleport.RegionLocation.Position;
+                    Orientation orientation = playerConnection.EntityToTeleport.RegionLocation.Orientation;
+                    if (playerConnection.EntityToTeleport.Prototype is TransitionPrototype teleportEntity
+                        && teleportEntity.SpawnOffset > 0) teleportEntity.CalcSpawnOffset(ref orientation, ref position);
+                    playerConnection.StartPosition = position;
                     playerConnection.StartOrientation = orientation;
                     playerConnection.EntityToTeleport = null;
                 }
                 else if (RegionTransition.FindStartPosition(this, targetRef, out Vector3 position, out Orientation orientation))
                 {
-                    playerConnection.StartPositon = position;
+                    playerConnection.StartPosition = position;
                     playerConnection.StartOrientation = orientation;
                 }
                 else
                 {
-                    playerConnection.StartPositon = StartArea.Cells.First().Value.RegionBounds.Center;
+                    playerConnection.StartPosition = StartArea.Cells.First().Value.RegionBounds.Center;
                     playerConnection.StartOrientation = Orientation.Zero;
                 }
-
-                playerConnection.AOI.Reset(this);
-                playerConnection.AOI.Update(playerConnection.StartPositon, true);
-                messageList.AddRange(playerConnection.AOI.Messages);
             }
-
 
             return messageList;
         }
@@ -781,9 +829,9 @@ namespace MHServerEmu.Games.Regions
             throw new NotImplementedException();
         }
 
-        internal PrototypeId GetDifficultyTierRef()
+        public PrototypeId GetDifficultyTierRef()
         {
-            throw new NotImplementedException();
+            return (PrototypeId)DifficultyTier.Normal; // TODO PropertyCollection[PropertyEnum.DifficultyTier];
         }
 
         public void Visited()
@@ -827,6 +875,425 @@ namespace MHServerEmu.Games.Regions
             return false;
         }
 
+        public int GetAreaLevel(Area area)
+        {
+            if (RegionPrototype.LevelUseAreaOffset) return area.GetAreaLevel();
+            return RegionLevel;
+        }
+
+        public bool HasKeyword(KeywordPrototype keywordProto)
+        {            
+            return keywordProto != null && RegionPrototype.HasKeyword(keywordProto);
+        }
+
+        public int AcquireCollisionId()
+        {
+            int index = _collisionIds.FirstUnset();
+            if (index == -1) index = _collisionIds.Size;
+            _collisionIds.Set(index, true);
+            return index;
+        }
+
+        public bool CollideEntities(int collisionId, int otherCollisionId)
+        {
+            int maxCollisionId = _collisionBitList.Count;
+            if (collisionId >= maxCollisionId)
+            {
+                maxCollisionId = MaxCollisionId + 64;
+                while (_collisionBitList.Count < maxCollisionId)
+                    _collisionBitList.Add(new ());
+            }
+
+            var collisionBits = _collisionBitList[collisionId];
+
+            if (_collisionBits[collisionId] == false)
+            {
+                _collisionBits.Set(collisionId);
+                collisionBits.Clear();
+            }
+
+            if (otherCollisionId >= collisionBits.Size)
+                collisionBits.Resize(maxCollisionId);
+
+            bool collide = collisionBits[otherCollisionId];
+            collisionBits.Set(otherCollisionId);
+            return !collide;
+        }
+
+        public int MaxCollisionId => _collisionIds.Size;
+
+        public void ReleaseCollisionId(int collisionId)
+        {
+            if (collisionId >= 0) _collisionIds.Reset(collisionId);
+        }
+
+        public void ClearCollidedEntities()
+        {
+            if (MaxCollisionId < _collisionBitList.Count / 2)
+            {
+                _collisionBitList.Clear();
+                _collisionBits.Resize(0);
+            }
+            else
+            {
+                _collisionBits.Clear();
+            }
+        }
+
+        public static PathFlags GetPathFlagsForEntity(WorldEntityPrototype entityProto)
+        {
+            return entityProto != null ? Locomotor.GetPathFlags(entityProto.NaviMethod) : PathFlags.None;
+        }
+
+        public bool LineOfSightTo(Vector3 startPosition, WorldEntity owner, Vector3 targetPosition, ulong targetEntityId,
+            float radius = 0.0f, float padding = 0.0f, float height = 0.0f, PathFlags pathFlags = PathFlags.Sight)
+        {
+            float maxHeight = Math.Max(startPosition.Z, targetPosition.Z);
+            maxHeight += height;
+            Vector3? resultPosition = Vector3.Zero;
+            Vector3? resultNormal = null;
+            var sweepResult = NaviMesh.Sweep(startPosition, targetPosition, radius, pathFlags, ref resultPosition, ref resultNormal,
+                padding, HeightSweepType.Constraint, (int)maxHeight, short.MinValue, owner);
+            if (sweepResult == SweepResult.Success)
+            {
+                Vector3? resultHitPosition = null;
+                return SweepToFirstHitEntity(startPosition, targetPosition, owner, targetEntityId, true, 0.0f, ref resultHitPosition) == null;
+            }
+            return false;
+        }
+
+        public WorldEntity SweepToFirstHitEntity<T>(Bounds sweepBounds, Vector3 sweepVelocity, ref Vector3? resultHitPosition, T canBlock) where T: ICanBlock
+        {
+            bool CanBlockFunc(WorldEntity otherEntity) => canBlock.CanBlock(otherEntity);
+            return SweepToFirstHitEntity(sweepBounds, sweepVelocity, ref resultHitPosition, CanBlockFunc);
+        }
+
+        public WorldEntity SweepToFirstHitEntity(Vector3 startPosition, Vector3 targetPosition, WorldEntity owner, 
+            ulong targetEntityId, bool blocksLOS, float radiusOverride, ref Vector3? resultHitPosition)
+        {
+            Bounds sweepBounds = new ();
+
+            if (owner != null)
+                sweepBounds = new(owner.Bounds);
+
+            if (blocksLOS || owner == null)
+                sweepBounds.InitializeSphere(1.0f, sweepBounds.CollisionType);
+
+            if (radiusOverride > 0.0f)
+                sweepBounds.Radius = radiusOverride;
+
+            sweepBounds.Center = startPosition;
+            Vector3 sweepVector = targetPosition - startPosition;
+
+            bool CanBlockFunc(WorldEntity otherEntity) => CanBlockEntitySweep(otherEntity, owner, targetEntityId, blocksLOS);
+            return SweepToFirstHitEntity(sweepBounds, sweepVector, ref resultHitPosition, CanBlockFunc);
+        }
+
+        private WorldEntity SweepToFirstHitEntity(Bounds sweepBounds, Vector3 sweepVelocity, ref Vector3? resultHitPosition, Func<WorldEntity, bool> canBlockFunc)
+        {
+            Vector3 sweepStart = sweepBounds.Center;
+            Vector3 sweepEnd = sweepStart + sweepVelocity;
+            float sweepRadius = sweepBounds.Radius;
+            Aabb sweepBox = new Aabb(sweepStart, sweepRadius) + new Aabb(sweepEnd, sweepRadius);
+
+            var sweepVector2D = sweepVelocity.To2D();
+            if (Vector3.IsNearZero(sweepVector2D)) return null;
+            Vector3.SafeNormalAndLength2D(sweepVector2D, out Vector3 sweepNormal2D, out float sweepLength);
+
+            float minTime = 1.0f;
+            float minDot = -1f;
+            WorldEntity hitEntity = null;
+            var spContext = new EntityRegionSPContext(EntityRegionSPContextFlags.All);
+            foreach (var otherEntity in IterateEntitiesInVolume(sweepBox, spContext))
+                if (canBlockFunc(otherEntity))
+                {
+                    float resultTime = 1.0f;
+                    Vector3? resultNormal = null;
+                    if (sweepBounds.Sweep(otherEntity.Bounds, Vector3.Zero, sweepVelocity, ref resultTime, ref resultNormal))
+                    {
+                        if (hitEntity != null)
+                        {
+                            float epsilon = 0.25f / sweepLength;
+                            if (Segment.EpsilonTest(resultTime, minTime, epsilon))
+                            {
+                                float dot = Vector3.Dot(sweepNormal2D, Vector3.Normalize2D(otherEntity.RegionLocation.Position - sweepStart));
+                                if (dot > minDot)
+                                {
+                                    hitEntity = otherEntity;
+                                    minTime = resultTime;
+                                    minDot = dot;
+                                    resultHitPosition = sweepStart + sweepVelocity * minTime;
+                                }
+                            }
+                        }
+
+                        if (resultTime < minTime)
+                        {
+                            float dot = Vector3.Dot(sweepNormal2D, Vector3.Normalize2D(otherEntity.RegionLocation.Position - sweepStart));
+                            hitEntity = otherEntity;
+                            minTime = resultTime;
+                            minDot = dot;
+                            resultHitPosition = sweepStart + sweepVelocity * minTime;
+                        }
+                    }
+                }
+
+            return hitEntity;
+        }
+
+        private static bool CanBlockEntitySweep(WorldEntity testEntity, WorldEntity owner, ulong targetEntityId, bool blocksLOS)
+        {
+            if (testEntity == null) return false;
+
+            if (owner != null)
+            {
+                if (testEntity.Id == owner.Id) return false;
+                if (blocksLOS == false && owner.CanBeBlockedBy(testEntity)) return true;
+            }
+
+            if (targetEntityId != Entity.InvalidId && testEntity.Id == targetEntityId) return false;
+
+            if (blocksLOS)
+            {
+                var proto = testEntity.WorldEntityPrototype;
+                if (proto == null) return false;
+                if (proto.Bounds.BlocksLineOfSight) return true;
+            }
+
+            return false;
+        }
+
+        public bool ChoosePositionAtOrNearPoint(Bounds bounds, PathFlags pathFlags, PositionCheckFlags posFlags, BlockingCheckFlags blockFlags, 
+            float maxDistance, out Vector3 resultPosition, RandomPositionPredicate positionPredicate = null, 
+            EntityCheckPredicate checkPredicate = null, int maxPositionTests = 400)
+        {
+            if (IsLocationClear(bounds, pathFlags, posFlags, blockFlags)
+                && (positionPredicate == null || positionPredicate.Test(bounds.Center)))
+            {
+                resultPosition = bounds.Center;
+                return true;
+            }
+            else
+                return ChooseRandomPositionNearPoint(bounds, pathFlags, posFlags, blockFlags, 0, maxDistance, out resultPosition, 
+                    positionPredicate, checkPredicate, maxPositionTests);
+           
+        }
+
+        public bool ChooseRandomPositionNearPoint(Bounds bounds, PathFlags pathFlags, PositionCheckFlags posFlags, BlockingCheckFlags blockFlags,
+            float minDistanceFromPoint, float maxDistanceFromPoint, out Vector3 resultPosition, RandomPositionPredicate positionPredicate = null,
+            EntityCheckPredicate checkPredicate = null, int maxPositionTests = 400, HeightSweepType heightSweep = HeightSweepType.None,
+            int maxSweepHeight = 0)
+        {
+            resultPosition = Vector3.Zero;
+            if (maxDistanceFromPoint < minDistanceFromPoint) return false;
+
+            if (posFlags.HasFlag(PositionCheckFlags.CanPathTo) && posFlags.HasFlag(PositionCheckFlags.CanSweepTo))
+            {
+                Logger.Warn("Do not use CheckCanSweepTo with CheckCanPathTo, it is a worthless CheckPath after the CheckSweep passes. " +
+                            "If the CheckSweep fails, the point is dropped and CheckPath never happens. " +
+                            "If you must CheckPath, you want EXCLUSIVELY CheckCanPathTo.");
+                return false;
+            }
+
+            if (maxPositionTests <= 0)
+            {
+                Logger.Warn("maxPositionTests must be greater than zero or you will not test any positions!");
+                return false;
+            }
+
+            Vector3 point = bounds.Center;
+            resultPosition.Z = point.Z;
+            var random = Game.Random;
+
+            List<WorldEntity> entitiesInRadius = new ();
+            if (posFlags.HasFlag(PositionCheckFlags.CanBeBlockedEntity) || posFlags.HasFlag(PositionCheckFlags.CanPathToEntities))
+            {
+                entitiesInRadius.Capacity = 256;
+                GetEntitiesInVolume(entitiesInRadius, new Sphere(point, maxDistanceFromPoint), new EntityRegionSPContext(EntityRegionSPContextFlags.ActivePartition));
+
+                if (posFlags.HasFlag(PositionCheckFlags.CanBeBlockedEntity) && checkPredicate != null)
+                    for (int i = entitiesInRadius.Count - 1; i >= 0; i--)
+                        if (checkPredicate.Test(entitiesInRadius[i]) == false)
+                            entitiesInRadius.RemoveAt(i);
+            }
+
+            Bounds checkBounds = new(bounds);
+            if (blockFlags.HasFlag(BlockingCheckFlags.CheckSpawns))
+                checkBounds.CollisionType = BoundsCollisionType.Blocking;
+
+            float minDistanceSq = minDistanceFromPoint * minDistanceFromPoint;
+            float maxDistanceSq = maxDistanceFromPoint * maxDistanceFromPoint;
+
+            bool foundBlockedEntity = false;
+            Vector3 blockedPosition = Vector3.Zero;
+
+            List<WorldEntity> influenceEntities = new ();
+
+            if (posFlags.HasFlag(PositionCheckFlags.CanPathToEntities))
+                foreach (WorldEntity entity in entitiesInRadius)
+                    if (entity.HasNavigationInfluence)
+                    {
+                        entity.DisableNavigationInfluence();
+                        influenceEntities.Add(entity);
+                    }
+
+            PathFlags checkPathFlags = pathFlags;
+            if (blockFlags.HasFlag(BlockingCheckFlags.CheckLanding))
+                checkPathFlags = PathFlags.Walk;
+
+            float angle = 0f;
+            float checkRadius = Math.Max(bounds.Radius, 5.0f);
+            checkRadius = Math.Max(checkRadius, minDistanceFromPoint);
+            float circumference = checkRadius / 1.5f;
+
+            int tries = maxPositionTests; // 400!
+            while (tries-- > 0)
+            {
+                Vector3 offset = Vector3.Zero;
+                if (posFlags.HasFlag(PositionCheckFlags.InRadius))
+                {
+                    offset.X = checkRadius;
+                    offset = Vector3.AxisAngleRotate(offset, Vector3.ZAxis, angle);
+                    angle += circumference / checkRadius;
+                    if (angle >= MathHelper.TwoPi)
+                    {
+                        checkRadius += Math.Max(bounds.Radius, 5.0f);
+                        angle = 0f;
+                        if (checkRadius > maxDistanceFromPoint) break;
+                    }
+                }
+                else
+                {
+                    offset.X = random.NextFloat(-maxDistanceFromPoint, maxDistanceFromPoint);
+                    offset.Y = random.NextFloat(-maxDistanceFromPoint, maxDistanceFromPoint);
+                    float lengthSq = Vector3.LengthSquared(offset);
+                    if (lengthSq < minDistanceSq || lengthSq > maxDistanceSq)
+                        continue;
+                }
+
+                resultPosition.X = point.X + offset.X;
+                resultPosition.Y = point.Y + offset.Y;
+                checkBounds.Center = resultPosition;
+
+                var naviMesh = NaviMesh;
+                if (naviMesh.Contains(checkBounds.Center, checkBounds.Radius, new DefaultContainsPathFlagsCheck(checkPathFlags)))
+                {
+                    if (posFlags.HasFlag(PositionCheckFlags.CanSweepTo) || posFlags.HasFlag(PositionCheckFlags.CanSweepRadius))
+                    {
+                        Vector3? resultSweepPosition = new();
+                        Vector3? resultNorm = null;
+                        float radius = posFlags.HasFlag(PositionCheckFlags.CanSweepRadius) ? 0f : bounds.Radius;
+                        SweepResult sweepResult = naviMesh.Sweep(point, resultPosition, radius, pathFlags, 
+                            ref resultSweepPosition, ref resultNorm, 0f, heightSweep, maxSweepHeight);
+                        if (sweepResult != SweepResult.Success) continue;
+                    }
+
+                    if (posFlags.HasFlag(PositionCheckFlags.CanPathTo) || posFlags.HasFlag(PositionCheckFlags.CanPathToEntities))
+                        if (NaviPath.CheckCanPathTo(naviMesh, bounds.Center, resultPosition, bounds.Radius, pathFlags) != NaviPathResult.Success)
+                            continue;
+
+                    if (positionPredicate != null && positionPredicate.Test(resultPosition) == false)
+                        continue;
+
+                    if (posFlags.HasFlag(PositionCheckFlags.CanBeBlockedEntity))
+                        if (IsLocationClearOfEntities(checkBounds, entitiesInRadius, blockFlags) == false)
+                        {
+                            if (posFlags.HasFlag(PositionCheckFlags.PreferNoEntity) && foundBlockedEntity == false)
+                            {
+                                foundBlockedEntity = true;
+                                blockedPosition = checkBounds.Center;
+                            }
+                            continue;
+                        }
+
+                    return true;
+                }
+            }
+
+            foreach (WorldEntity entity in influenceEntities)
+                entity.EnableNavigationInfluence();
+
+            if (posFlags.HasFlag(PositionCheckFlags.CanBeBlockedEntity) && posFlags.HasFlag(PositionCheckFlags.PreferNoEntity) && foundBlockedEntity)
+            {
+                resultPosition = blockedPosition;
+                return true;
+            }
+
+            resultPosition = point;
+            return false;
+        }
+
+        public void GetEntitiesInVolume<B>(List<WorldEntity> entities, B volume, EntityRegionSPContext context) where B : IBounds
+        {
+            EntitySpatialPartition?.GetElementsInVolume(entities, volume, context);
+        }
+
+        private static bool IsLocationClearOfEntities(Bounds bounds, List<WorldEntity> entities, BlockingCheckFlags blockFlags = BlockingCheckFlags.None)
+        {
+            foreach (var entity in entities)
+                if (IsBoundsBlockedByEntity(bounds, entity, blockFlags))
+                    return false;
+            return true;
+        }
+
+        public bool IsLocationClear(Bounds bounds, PathFlags pathFlags, PositionCheckFlags posFlags, BlockingCheckFlags blockFlags = BlockingCheckFlags.None)
+        {
+            if (NaviMesh.Contains(bounds.Center, bounds.Radius, new DefaultContainsPathFlagsCheck(pathFlags)) == false)
+                return false;
+
+            if (posFlags.HasFlag(PositionCheckFlags.CanBeBlockedEntity) || posFlags.HasFlag(PositionCheckFlags.CanBeBlockedAvatar))
+            {
+                var volume = new Sphere(bounds.Center, bounds.Radius);
+                foreach (WorldEntity entity in IterateEntitiesInVolume(volume, new ( EntityRegionSPContextFlags.ActivePartition)))
+                {
+                    if (posFlags.HasFlag(PositionCheckFlags.CanBeBlockedAvatar) && entity is not Avatar) continue;
+                    if (IsBoundsBlockedByEntity(bounds, entity, blockFlags)) 
+                        return false;
+                }
+            }
+
+            return true;
+        }
+
+        public Aabb2 GetAabb2() => new(Bound);
+
+        public bool ProjectBoundsIntoRegion(ref Bounds bounds, in Vector3 direction)
+        {
+            Point2[] points = GetAabb2().Expand(-bounds.GetRadius()).GetPoints();
+
+            float minDistance = float.MaxValue;
+            Vector3 closestPoint = Vector3.Zero;
+
+            for (int i = 0; i < 4; i++)
+            {
+                var point1 = new Vector3(points[i].X, points[i].Y, 0.0f);
+                var point2 = new Vector3(points[(i + 1) % 4].X, points[(i + 1) % 4].Y, 0.0f);
+
+                if (Segment.RaySegmentIntersect2D(bounds.Center, direction, point1, point2 - point1, out Vector3 intersectPoint))
+                {
+                    float distance = Vector3.Distance(intersectPoint, bounds.Center);
+                    if (distance < minDistance)
+                    {
+                        minDistance = distance;
+                        closestPoint = intersectPoint;
+                    }
+                }
+            }
+            if (minDistance == float.MaxValue) return false;
+
+            bounds.Center = new Vector3(closestPoint.X, closestPoint.Y, bounds.Center.Z);
+            return true;
+        }
+    }
+
+    public class RandomPositionPredicate
+    {
+        public virtual bool Test(Vector3 center) => false;
+    }
+
+    public class EntityCheckPredicate
+    {
+        public virtual bool Test(WorldEntity worldEntity) => false;
     }
 
     public class DividedStartLocation

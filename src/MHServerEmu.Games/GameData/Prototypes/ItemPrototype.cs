@@ -1,6 +1,9 @@
 ﻿using MHServerEmu.Core.Logging;
+using MHServerEmu.Games.Entities.Inventories;
+using MHServerEmu.Games.Entities.Items;
 using MHServerEmu.Games.GameData.Calligraphy.Attributes;
 using MHServerEmu.Games.Loot;
+using MHServerEmu.Games.Properties.Evals;
 
 namespace MHServerEmu.Games.GameData.Prototypes
 {
@@ -45,6 +48,8 @@ namespace MHServerEmu.Games.GameData.Prototypes
 
     public class ItemPrototype : WorldEntityPrototype
     {
+        private static readonly Logger Logger = LogManager.CreateLogger();
+
         public bool IsUsable { get; protected set; }
         public bool CanBeSoldToVendor { get; protected set; }
         public int MaxVisiblePrefixes { get; protected set; }
@@ -79,7 +84,7 @@ namespace MHServerEmu.Games.GameData.Prototypes
         public EvalPrototype EvalExpirationTimeMS { get; protected set; }
         public ItemTooltipPropertyBlockSettingsPrototype[] TooltipCustomPropertyBlocks { get; protected set; }
         public float LootDropWeightMultiplier { get; protected set; }
-        public ConvenienceLabel DestinationFromVendor { get; protected set; }
+        public InventoryConvenienceLabel DestinationFromVendor { get; protected set; }
         public EvalPrototype EvalDisplayLevel { get; protected set; }
         public bool CanBroadcast { get; protected set; }
         public EquipmentInvUISlot DefaultEquipmentSlot { get; protected set; }
@@ -89,6 +94,22 @@ namespace MHServerEmu.Games.GameData.Prototypes
         public PrototypeId SortSubCategory { get; protected set; }
         public ItemInstrumentedDropGroup InstrumentedDropGroup { get; protected set; }
         public bool IsContainer { get; protected set; }
+
+        public void OnApplyItemSpec(Item item, ItemSpec itemSpec)
+        {
+            // TODO
+        }
+
+        public TimeSpan GetExpirationTime(PrototypeId rarityProtoRef)
+        {
+            if (EvalExpirationTimeMS == null) return Logger.WarnReturn(TimeSpan.Zero, "GetExpirationTime(): EvalExpirationTimeMS == null");
+
+            EvalContextData contextData = new();
+            contextData.SetReadOnlyVar_ProtoRef(EvalContext.Var1, rarityProtoRef);
+
+            int expirationTimeMS = Eval.RunInt(EvalExpirationTimeMS, contextData);
+            return TimeSpan.FromMilliseconds(expirationTimeMS);
+        }
     }
 
     public class ItemAbilitySettingsPrototype : Prototype

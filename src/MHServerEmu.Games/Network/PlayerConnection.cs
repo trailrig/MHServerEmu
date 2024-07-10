@@ -2,13 +2,19 @@
 using Google.ProtocolBuffers;
 using MHServerEmu.Core.Logging;
 using MHServerEmu.Core.Network;
+using MHServerEmu.Core.Serialization;
 using MHServerEmu.Core.VectorMath;
 using MHServerEmu.DatabaseAccess.Models;
 using MHServerEmu.Frontend;
+using MHServerEmu.Games.Common;
 using MHServerEmu.Games.Entities;
 using MHServerEmu.Games.Entities.Avatars;
+using MHServerEmu.Games.Entities.Inventories;
+using MHServerEmu.Games.Entities.Items;
+using MHServerEmu.Games.Entities.Locomotion;
 using MHServerEmu.Games.Entities.Options;
 using MHServerEmu.Games.Events;
+using MHServerEmu.Games.Events.LegacyImplementations;
 using MHServerEmu.Games.GameData;
 using MHServerEmu.Games.GameData.Prototypes;
 using MHServerEmu.Games.Powers;
@@ -32,9 +38,15 @@ namespace MHServerEmu.Games.Network
         private readonly FrontendClient _frontendClient;
         private readonly DBAccount _dbAccount;
         private readonly List<IMessage> _pendingMessageList = new();
-        private readonly PowerMessageHandler _powerMessageHandler;
+        private readonly IPowerMessageHandler _powerMessageHandler;
+        public bool IsUsingNewPowerMessageHandler { get => _powerMessageHandler is NewPowerMessageHandler; }    // temp
+
+        private EventPointer<OLD_FinishCellLoadingEvent> _finishCellLoadingEvent = new();
+        private EventPointer<OLD_PreInteractPowerEndEvent> _preInteractPowerEndEvent = new();
 
         public Game Game { get; }
+
+        public ulong PlayerDbId { get => _dbAccount.Id; }
 
         // Player State
         public Player Player { get; private set; }
@@ -44,14 +56,10 @@ namespace MHServerEmu.Games.Network
 
         public bool IsLoading { get; set; } = true;     // This is true by default because the player manager queues the first loading screen
         public Vector3 LastPosition { get; set; }
-        public ulong MagikUltimateEntityId { get; set; }
-        public bool IsThrowing { get; set; } = false;
-        public PrototypeId ThrowingPower { get; set; }
-        public PrototypeId ThrowingCancelPower { get; set; }
-        public Entity ThrowingObject { get; set; }
+        public Orientation LastOrientation { get; set; }
 
         public AreaOfInterest AOI { get; private set; }
-        public Vector3 StartPositon { get; internal set; }
+        public Vector3 StartPosition { get; internal set; }
         public Orientation StartOrientation { get; internal set; }
         public WorldEntity EntityToTeleport { get; internal set; }
 
@@ -64,7 +72,8 @@ namespace MHServerEmu.Games.Network
             Game = game;
             _frontendClient = frontendClient;
             _dbAccount = _frontendClient.Session.Account;
-            _powerMessageHandler = new(Game);
+            //_powerMessageHandler = new OldPowerMessageHandler(this);
+            _powerMessageHandler = new NewPowerMessageHandler(this);      // Uncomment to switch to the new power implementation
 
             InitializeFromDBAccount();
         }
@@ -81,6 +90,7 @@ namespace MHServerEmu.Games.Network
             _dbAccount.Player.AOIVolume = (int)AOI.AOIVolume;
 
             Player.SaveToDBAccount(_dbAccount);
+            Logger.Trace($"Updated DBAccount {_dbAccount}");
         }
 
         /// <summary>
@@ -107,34 +117,52 @@ namespace MHServerEmu.Games.Network
 
             AOI = new(this, _dbAccount.Player.AOIVolume);
 
-            // Create player and avatar entities
-            Player = new(new EntityBaseData());
-            Player.InitializeFromDBAccount(_dbAccount);
+            // Create player entity
+            EntitySettings playerSettings = new();
+            playerSettings.DbGuid = _dbAccount.Id;
+            playerSettings.EntityRef = GameDatabase.GlobalsPrototype.DefaultPlayer;
+            playerSettings.OptionFlags = EntitySettingsOptionFlags.PopulateInventories;
+            playerSettings.PlayerConnection = this;
 
-            ulong avatarEntityId = Player.Id + 1;
-            ulong avatarRepId = Player.PartyId.ReplicationId + 1;
-            foreach (PrototypeId avatarId in dataDirectory.IteratePrototypesInHierarchy(typeof(AvatarPrototype),
-                PrototypeIterateFlags.NoAbstract | PrototypeIterateFlags.ApprovedOnly))
+            Player = (Player)Game.EntityManager.CreateEntity(playerSettings);
+            Player.LoadFromDBAccount(_dbAccount);
+
+            // Make sure we have a valid current avatar ref
+            var lastCurrentAvatarRef = (PrototypeId)_dbAccount.CurrentAvatar.RawPrototype;
+            if (dataDirectory.PrototypeIsA<AvatarPrototype>(lastCurrentAvatarRef) == false)
             {
-                if (avatarId == (PrototypeId)6044485448390219466) continue;   //zzzBrevikOLD.prototype
-
-                Avatar avatar = new(avatarEntityId, avatarRepId);
-                avatar.BaseData.InvLoc = new(Player.Id, PrototypeId.Invalid, 0);
-                avatarEntityId++;
-                avatarRepId += 2;
-
-                avatar.InitializeFromDBAccount(avatarId, _dbAccount);
-                Player.AvatarList.Add(avatar);
+                lastCurrentAvatarRef = GameDatabase.GlobalsPrototype.DefaultStartingAvatarPrototype;
+                Logger.Warn($"PlayerConnection(): Invalid avatar data ref specified in DBAccount, defaulting to {GameDatabase.GetPrototypeName(lastCurrentAvatarRef)}");
             }
 
-            var avatarDataRef = (PrototypeId)_dbAccount.CurrentAvatar.RawPrototype;
-            if (dataDirectory.PrototypeIsA<AvatarPrototype>(avatarDataRef) == false)
+            // Create avatars
+            Inventory avatarLibrary = Player.GetInventory(InventoryConvenienceLabel.AvatarLibrary);
+            Inventory avatarInPlay = Player.GetInventory(InventoryConvenienceLabel.AvatarInPlay);
+            foreach (PrototypeId avatarRef in dataDirectory.IteratePrototypesInHierarchy<AvatarPrototype>(PrototypeIterateFlags.NoAbstractApprovedOnly))
             {
-                avatarDataRef = GameDatabase.GlobalsPrototype.DefaultStartingAvatarPrototype;
-                Logger.Warn($"PlayerConnection(): Invalid avatar data ref specified in DBAccount, defaulting to {GameDatabase.GetPrototypeName(avatarDataRef)}");
+                if (avatarRef == (PrototypeId)6044485448390219466) continue;   //zzzBrevikOLD.prototype
+
+                EntitySettings avatarSettings = new();
+                avatarSettings.EntityRef = avatarRef;
+                avatarSettings.InventoryLocation = new(Player.Id, avatarRef == lastCurrentAvatarRef ? avatarInPlay.PrototypeDataRef : avatarLibrary.PrototypeDataRef);
+                avatarSettings.DBAccount = _dbAccount;
+
+                Game.EntityManager.CreateEntity(avatarSettings);
             }
 
-            Player.SetAvatar(avatarDataRef);
+            // Create team-up entities
+            if (Game.GameOptions.TeamUpSystemEnabled)
+            {
+                Inventory teamUpLibrary = Player.GetInventory(InventoryConvenienceLabel.TeamUpLibrary);
+                foreach (PrototypeId teamUpRef in dataDirectory.IteratePrototypesInHierarchy<AgentTeamUpPrototype>(PrototypeIterateFlags.NoAbstractApprovedOnly))
+                {
+                    EntitySettings teamUpSettings = new();
+                    teamUpSettings.EntityRef = teamUpRef;
+                    teamUpSettings.InventoryLocation = new(Player.Id, teamUpLibrary.PrototypeDataRef);
+
+                    Game.EntityManager.CreateEntity(teamUpSettings);
+                }
+            }
         }
 
         #endregion
@@ -142,6 +170,7 @@ namespace MHServerEmu.Games.Network
         #region NetClient Implementation
 
         // Do not use these methods directly, these are for the PlayerConnectionManager.
+        // C# has no friends T_T
 
         /// <summary>
         /// Adds a new <see cref="IMessage"/> to the pending message list.
@@ -169,7 +198,94 @@ namespace MHServerEmu.Games.Network
             _pendingMessageList.Clear();
         }
 
+        public bool CanSendOrReceiveMessages()
+        {
+            // TODO: Block message processing during certain states (e.g. malicious client sending messages while loading).
+            return true;
+        }
+
+        public void OnDisconnect()
+        {
+            // Post-disconnection cleanup (save data, remove entities, etc).
+            UpdateDBAccount();
+            Game.EntityManager.DestroyEntity(Player);
+        }
+
         #endregion
+
+        #region Loading and Exiting
+        
+        public void EnterGame()
+        {
+            Player.EnterGame();
+
+            SendMessage(NetMessageReadyAndLoadedOnGameServer.DefaultInstance);
+
+            // Before changing to the actual destination region the game seems to first change into a transitional region
+            SendMessage(NetMessageRegionChange.CreateBuilder()
+                .SetRegionId(0)
+                .SetServerGameId(0)
+                .SetClearingAllInterest(false)
+                .Build());
+
+            Player.QueueLoadingScreen(RegionDataRef);
+
+            AOI.LoadedCellCount = 0;
+            IsLoading = true;
+
+            Player.IsOnLoadingScreen = true;
+
+            Region region = Game.RegionManager.GetRegion((RegionPrototypeId)RegionDataRef);
+            if (region == null)
+            {
+                Logger.Error($"Event ErrorInRegion {GameDatabase.GetFormattedPrototypeName(RegionDataRef)}");
+                Disconnect();
+                return;
+            }
+
+            var messages = region.GetLoadingMessages(Game.Id, WaypointDataRef, this);
+            foreach (IMessage message in messages)
+                SendMessage(message);
+
+            AOI.SetRegion(region);
+            AOI.Update(StartPosition, true, true);
+        }
+
+        public void ExitGame()
+        {
+            // We need to recreate the player entity when we transfer between regions
+            // because client UI breaks for some reason when we reuse the same player entity id
+            // (e.g. inventory grid stops updating).
+            UpdateDBAccount();
+            Player.Destroy();
+            Game.EntityManager.ProcessDeferredLists();
+            InitializeFromDBAccount();
+        }
+
+        public void EnterGameWorld()
+        {
+            var avatar = Player.CurrentAvatar;
+            Vector3 entrancePosition = avatar.FloorToCenter(StartPosition);
+            AOI.Update(entrancePosition, true);
+
+            LastPosition = StartPosition;
+            LastOrientation = StartOrientation;
+            Player.EnableCurrentAvatar(false, Player.CurrentAvatar.Id);
+
+            Player.DequeueLoadingScreen();
+
+            // Play Kismet sequence intro for the region if there is one defined
+            Player.TryPlayKismetSeqIntroForRegion(RegionDataRef);
+
+            IsLoading = false;
+        }
+
+        #endregion
+
+        public void Disconnect()
+        {
+            _frontendClient.Disconnect();
+        }
 
         #region Message Handling
 
@@ -186,58 +302,69 @@ namespace MHServerEmu.Games.Network
         /// </summary>
         public void ReceiveMessage(MailboxMessage message)
         {
+            // NOTE: Please keep these ordered by message id
+
             switch ((ClientToGameServerMessage)message.Id)
             {
-                case ClientToGameServerMessage.NetMessageUpdateAvatarState:                 OnUpdateAvatarState(message); break;
-                case ClientToGameServerMessage.NetMessageCellLoaded:                        OnCellLoaded(message); break;
-                case ClientToGameServerMessage.NetMessageAdminCommand:                      OnAdminCommand(message); break;
-                case ClientToGameServerMessage.NetMessageUseInteractableObject:             OnUseInteractableObject(message); break;
-                case ClientToGameServerMessage.NetMessagePerformPreInteractPower:           OnPerformPreInteractPower(message); break;
-                case ClientToGameServerMessage.NetMessageTryInventoryMove:                  OnTryInventoryMove(message); break;
-                case ClientToGameServerMessage.NetMessageThrowInteraction:                  OnThrowInteraction(message); break;
-                case ClientToGameServerMessage.NetMessageUseWaypoint:                       OnUseWaypoint(message); break;
-                case ClientToGameServerMessage.NetMessageSwitchAvatar:                      OnSwitchAvatar(message); break;
-                case ClientToGameServerMessage.NetMessageAbilitySlotToAbilityBar:           OnAbilitySlotToAbilityBar(message); break;
-                case ClientToGameServerMessage.NetMessageAbilityUnslotFromAbilityBar:       OnAbilityUnslotFromAbilityBar(message); break;
-                case ClientToGameServerMessage.NetMessageAbilitySwapInAbilityBar:           OnAbilitySwapInAbilityBar(message); break;
-                case ClientToGameServerMessage.NetMessageGracefulDisconnect:                OnGracefulDisconnect(message); break;
-                case ClientToGameServerMessage.NetMessageSetPlayerGameplayOptions:          OnSetPlayerGameplayOptions(message); break;
-                case ClientToGameServerMessage.NetMessageRequestInterestInInventory:        OnRequestInterestInInventory(message); break;
-                case ClientToGameServerMessage.NetMessageRequestInterestInAvatarEquipment:  OnRequestInterestInAvatarEquipment(message); break;
-                case ClientToGameServerMessage.NetMessageOmegaBonusAllocationCommit:        OnOmegaBonusAllocationCommit(message); break;
-                case ClientToGameServerMessage.NetMessageChangeCameraSettings:              OnChangeCameraSettings(message); break;
+                case ClientToGameServerMessage.NetMessageUpdateAvatarState:                 OnUpdateAvatarState(message); break;                // 6
+                case ClientToGameServerMessage.NetMessageCellLoaded:                        OnCellLoaded(message); break;                       // 7
+                case ClientToGameServerMessage.NetMessageAdminCommand:                      OnAdminCommand(message); break;                     // 9
+                case ClientToGameServerMessage.NetMessagePickupInteraction:                 OnPickupInteraction(message); break;                // 32
+                case ClientToGameServerMessage.NetMessageTryInventoryMove:                  OnTryInventoryMove(message); break;                 // 33
+                case ClientToGameServerMessage.NetMessageInventoryTrashItem:                OnInventoryTrashItem(message); break;               // 35
+                case ClientToGameServerMessage.NetMessageThrowInteraction:                  OnThrowInteraction(message); break;                 // 36
+                case ClientToGameServerMessage.NetMessagePerformPreInteractPower:           OnPerformPreInteractPower(message); break;          // 37
+                case ClientToGameServerMessage.NetMessageUseInteractableObject:             OnUseInteractableObject(message); break;            // 38
+                case ClientToGameServerMessage.NetMessageUseWaypoint:                       OnUseWaypoint(message); break;                      // 40
+                case ClientToGameServerMessage.NetMessageSwitchAvatar:                      OnSwitchAvatar(message); break;                     // 42
+                case ClientToGameServerMessage.NetMessageAbilitySlotToAbilityBar:           OnAbilitySlotToAbilityBar(message); break;          // 46
+                case ClientToGameServerMessage.NetMessageAbilityUnslotFromAbilityBar:       OnAbilityUnslotFromAbilityBar(message); break;      // 47
+                case ClientToGameServerMessage.NetMessageAbilitySwapInAbilityBar:           OnAbilitySwapInAbilityBar(message); break;          // 48
+                case ClientToGameServerMessage.NetMessageReturnToHub:                       OnReturnToHub(message); break;                      // 55
+                case ClientToGameServerMessage.NetMessageNotifyLoadingScreenFinished:       OnNotifyLoadingScreenFinished(message); break;      // 86
+                case ClientToGameServerMessage.NetMessagePlayKismetSeqDone:                 OnPlayKismetSeqDone(message); break;                // 96
+                case ClientToGameServerMessage.NetMessageGracefulDisconnect:                OnGracefulDisconnect(message); break;               // 98
+                case ClientToGameServerMessage.NetMessageSetPlayerGameplayOptions:          OnSetPlayerGameplayOptions(message); break;         // 113
+                case ClientToGameServerMessage.NetMessageRequestInterestInInventory:        OnRequestInterestInInventory(message); break;       // 121
+                case ClientToGameServerMessage.NetMessageRequestInterestInAvatarEquipment:  OnRequestInterestInAvatarEquipment(message); break; // 123
+                case ClientToGameServerMessage.NetMessageRequestInterestInTeamUpEquipment:  OnRequestInterestInTeamUpEquipment(message); break; // 124
+                case ClientToGameServerMessage.NetMessageTryTeamUpSelect:                   OnTryTeamUpSelect(message); break;                  // 125
+                case ClientToGameServerMessage.NetMessageRequestTeamUpDismiss:              OnRequestTeamUpDismiss(message); break;             // 126
+                case ClientToGameServerMessage.NetMessageOmegaBonusAllocationCommit:        OnOmegaBonusAllocationCommit(message); break;       // 132
+                case ClientToGameServerMessage.NetMessageAssignStolenPower:                 OnAssignStolenPower(message); break;                // 139
+                case ClientToGameServerMessage.NetMessageChangeCameraSettings:              OnChangeCameraSettings(message); break;             // 148
 
-                // Power Messages
-                case ClientToGameServerMessage.NetMessageTryActivatePower:
-                case ClientToGameServerMessage.NetMessagePowerRelease:
-                case ClientToGameServerMessage.NetMessageTryCancelPower:
-                case ClientToGameServerMessage.NetMessageTryCancelActivePower:
-                case ClientToGameServerMessage.NetMessageContinuousPowerUpdateToServer:
-                case ClientToGameServerMessage.NetMessageAssignStolenPower:
+                // Power Messages (NOTE: These will be merged with PlayerConnection in the future)
+                case ClientToGameServerMessage.NetMessageTryActivatePower:                                                                      // 10
+                case ClientToGameServerMessage.NetMessagePowerRelease:                                                                          // 11
+                case ClientToGameServerMessage.NetMessageTryCancelPower:                                                                        // 12
+                case ClientToGameServerMessage.NetMessageTryCancelActivePower:                                                                  // 13
+                case ClientToGameServerMessage.NetMessageContinuousPowerUpdateToServer:                                                         // 14
+                case ClientToGameServerMessage.NetMessageCancelPendingAction:                                                                   // 15
                     _powerMessageHandler.ReceiveMessage(this, message); break;
 
                 // Grouping Manager
-                case ClientToGameServerMessage.NetMessageChat:
-                case ClientToGameServerMessage.NetMessageTell:
-                case ClientToGameServerMessage.NetMessageReportPlayer:
-                case ClientToGameServerMessage.NetMessageChatBanVote:
+                case ClientToGameServerMessage.NetMessageChat:                                                                                  // 64
+                case ClientToGameServerMessage.NetMessageTell:                                                                                  // 65
+                case ClientToGameServerMessage.NetMessageReportPlayer:                                                                          // 66
+                case ClientToGameServerMessage.NetMessageChatBanVote:                                                                           // 67
                     ServerManager.Instance.RouteMessage(_frontendClient, message, ServerType.GroupingManager);
                     break;
 
                 // Billing
-                case ClientToGameServerMessage.NetMessageGetCatalog:
-                case ClientToGameServerMessage.NetMessageGetCurrencyBalance:
-                case ClientToGameServerMessage.NetMessageBuyItemFromCatalog:
-                case ClientToGameServerMessage.NetMessageBuyGiftForOtherPlayer:
-                case ClientToGameServerMessage.NetMessagePurchaseUnlock:
-                case ClientToGameServerMessage.NetMessageGetGiftHistory:
+                case ClientToGameServerMessage.NetMessageGetCatalog:                                                                            // 68
+                case ClientToGameServerMessage.NetMessageGetCurrencyBalance:                                                                    // 69
+                case ClientToGameServerMessage.NetMessageBuyItemFromCatalog:                                                                    // 70
+                case ClientToGameServerMessage.NetMessageBuyGiftForOtherPlayer:                                                                 // 71
+                case ClientToGameServerMessage.NetMessagePurchaseUnlock:                                                                        // 72
+                case ClientToGameServerMessage.NetMessageGetGiftHistory:                                                                        // 73
                     ServerManager.Instance.RouteMessage(_frontendClient, message, ServerType.Billing);
                     break;
 
                 // Leaderboards
-                case ClientToGameServerMessage.NetMessageLeaderboardRequest:
-                case ClientToGameServerMessage.NetMessageLeaderboardArchivedInstanceListRequest:
-                case ClientToGameServerMessage.NetMessageLeaderboardInitializeRequest:
+                case ClientToGameServerMessage.NetMessageLeaderboardRequest:                                                                    // 157
+                case ClientToGameServerMessage.NetMessageLeaderboardArchivedInstanceListRequest:                                                // 158
+                case ClientToGameServerMessage.NetMessageLeaderboardInitializeRequest:                                                          // 159
                     ServerManager.Instance.RouteMessage(_frontendClient, message, ServerType.Leaderboard);
                     break;
 
@@ -245,34 +372,98 @@ namespace MHServerEmu.Games.Network
             }
         }
 
-        private bool OnUpdateAvatarState(MailboxMessage message)
+        private bool OnUpdateAvatarState(MailboxMessage message)    // 6
         {
             var updateAvatarState = message.As<NetMessageUpdateAvatarState>();
             if (updateAvatarState == null) return Logger.WarnReturn(false, $"OnUpdateAvatarState(): Failed to retrieve message");
 
-            UpdateAvatarStateArchive avatarState = new(updateAvatarState.ArchiveData);
-            //Vector3 oldPosition = client.LastPosition;
-            LastPosition = avatarState.Position;
-            AOI.Region.Visited();
+            Avatar avatar = Player.CurrentAvatar;
+            if (avatar == null || avatar.IsInWorld == false) return false;
+
+            // Transfer data from the archive
+            // NOTE: We need to be extra careful here because this is the only archive that is serialized by the client,
+            // so it can be potentially malformed / malicious.
+            using Archive archive = new(ArchiveSerializeType.Replication, updateAvatarState.ArchiveData);
+
+            int avatarIndex = 0;
+            if (Serializer.Transfer(archive, ref avatarIndex) == false)
+                return Logger.WarnReturn(false, "OnUpdateAvatarState(): Failed to transfer avatarIndex");
+
+            ulong avatarEntityId = 0;
+            if (Serializer.Transfer(archive, ref avatarEntityId) == false)
+                return Logger.WarnReturn(false, "OnUpdateAvatarState(): Failed to transfer avatarEntityId");
+
+            if (avatarEntityId != avatar.Id) return false;
+
+            bool isUsingGamepadInput = false;
+            if (Serializer.Transfer(archive, ref isUsingGamepadInput) == false)
+                return Logger.WarnReturn(false, "OnUpdateAvatarState(): Failed to transfer isUsingGamepadInput");
+            avatar.IsUsingGamepadInput = isUsingGamepadInput;
+
+            uint avatarWorldInstanceId = 0;
+            if (Serializer.Transfer(archive, ref avatarWorldInstanceId) == false)
+                return Logger.WarnReturn(false, "OnUpdateAvatarState(): Failed to transfer avatarWorldInstanceId");
+
+            uint fieldFlagsRaw = 0;
+            if (Serializer.Transfer(archive, ref fieldFlagsRaw) == false)
+                return Logger.WarnReturn(false, "OnUpdateAvatarState(): Failed to transfer fieldFlags");
+            var fieldFlags = (LocomotionMessageFlags)fieldFlagsRaw;
+
+            Vector3 syncPosition = Vector3.Zero;
+            if (Serializer.TransferVectorFixed(archive, ref syncPosition, 3) == false)
+                return Logger.WarnReturn(false, "OnUpdateAvatarState(): Failed to transfer syncPosition");
+
+            Orientation syncOrientation = Orientation.Zero;
+            bool yawOnly = fieldFlags.HasFlag(LocomotionMessageFlags.HasFullOrientation) == false;
+            if (Serializer.TransferOrientationFixed(archive, ref syncOrientation, yawOnly, 6) == false)
+                return Logger.WarnReturn(false, "OnUpdateAvatarState(): Failed to transfer syncOrientation");
+
             // AOI
-            if (IsLoading == false && AOI.ShouldUpdate(avatarState.Position))
+            AOI.Region.Visited();
+            if (IsLoading == false)
+                AOI.Update(syncPosition);
+
+            // Update locomotion state
+            bool canMove = avatar.CanMove();
+            bool canRotate = avatar.CanRotate();
+            Vector3 position = avatar.RegionLocation.Position;
+            Orientation orientation = avatar.RegionLocation.Orientation;
+
+            if (canMove || canRotate)
             {
-                if (AOI.Update(avatarState.Position))
-                {
-                    //Logger.Trace($"AOI[{client.AOI.Messages.Count}][{client.AOI.LoadedEntitiesCount}]");
-                    foreach (IMessage aoiMessage in AOI.Messages)
-                        SendMessage(aoiMessage);
-                }
+                position = syncPosition;
+                orientation = syncOrientation;
+
+                // Update position without sending it to clients (local avatar is moved by its own client, other avatars are moved by locomotion)
+                avatar.ChangeRegionPosition(canMove ? position : null, canRotate ? orientation : null, ChangePositionFlags.DoNotSendToClients);
+                avatar.UpdateNavigationInfluence();
             }
 
-            /* Logger spam
-            Logger.Trace(avatarState.ToString())
-            Logger.Trace(avatarState.Position.ToString());
-            */
+            if (fieldFlags.HasFlag(LocomotionMessageFlags.NoLocomotionState) == false && avatar.Locomotor != null)
+            {
+                // Make a copy of the last sync state and update it with new data
+                LocomotionState newSyncState = new(avatar.Locomotor.LastSyncState);
+
+                // NOTE: Deserialize in a try block because we don't trust this
+                try
+                {
+                    LocomotionState.SerializeFrom(archive, newSyncState, fieldFlags);
+                }
+                catch (Exception e)
+                {
+                    return Logger.WarnReturn(false, $"OnUpdateAvatarState(): Failed to transfer newSyncState ({e.Message})");
+                }
+
+                avatar.Locomotor.SetSyncState(newSyncState, position, orientation);
+            }
+
+            LastPosition = avatar.RegionLocation.Position;
+            LastOrientation = avatar.RegionLocation.Orientation;
+
             return true;
         }
 
-        private bool OnCellLoaded(MailboxMessage message)
+        private bool OnCellLoaded(MailboxMessage message)   // 7
         {
             var cellLoaded = message.As<NetMessageCellLoaded>();
             if (cellLoaded == null) return Logger.WarnReturn(false, $"OnCellLoaded(): Failed to retrieve message");
@@ -282,13 +473,18 @@ namespace MHServerEmu.Games.Network
 
             if (IsLoading)
             {
-                Game.EventManager.KillEvent(this, EventEnum.FinishCellLoading);
+                if (_finishCellLoadingEvent.IsValid)
+                    Game.GameEventScheduler.CancelEvent(_finishCellLoadingEvent);
+
                 if (AOI.LoadedCellCount == AOI.CellsInRegion)
-                    Game.FinishLoading(this);
+                {
+                    EnterGameWorld();
+                }
                 else
                 {
                     // set timer 5 seconds for wait client answer
-                    Game.EventManager.AddEvent(this, EventEnum.FinishCellLoading, 5000, AOI.CellsInRegion);
+                    Game.GameEventScheduler.ScheduleEvent(_finishCellLoadingEvent, TimeSpan.FromSeconds(5));
+                    _finishCellLoadingEvent.Get().Initialize(this, AOI.CellsInRegion);
                     AOI.ForceCellLoad();
                 }
             }
@@ -296,14 +492,14 @@ namespace MHServerEmu.Games.Network
             return true;
         }
 
-        private bool OnAdminCommand(MailboxMessage message)
+        private bool OnAdminCommand(MailboxMessage message) // 9
         {
             if (_dbAccount.UserLevel < AccountUserLevel.Admin)
             {
                 // Naughty hacker here, TODO: handle this properly
                 Logger.Warn($"OnAdminCommand(): Unauthorized admin command received from {_dbAccount}");
-                SendMessage(NetMessageAdminCommandResponse.CreateBuilder()
-                    .SetResponse($"{_dbAccount.PlayerName} is not in the sudoers file. This incident will be reported.").Build());
+                AdminCommandManager.SendAdminCommandResponse(this,
+                    $"{_dbAccount.PlayerName} is not in the sudoers file. This incident will be reported.");
                 return true;
             }
 
@@ -311,30 +507,121 @@ namespace MHServerEmu.Games.Network
             var command = message.As<NetMessageAdminCommand>();
             string output = $"Unhandled admin command: {command.Command.Split(' ')[0]}";
             Logger.Warn(output);
-            SendMessage(NetMessageAdminCommandResponse.CreateBuilder().SetResponse(output).Build());
+            AdminCommandManager.SendAdminCommandResponse(this, output);
             return true;
         }
 
-        private bool OnPerformPreInteractPower(MailboxMessage message)
+        private bool OnPickupInteraction(MailboxMessage message)    // 32
+        {
+            var pickupInteraction = message.As<NetMessagePickupInteraction>();
+            if (pickupInteraction == null) return Logger.WarnReturn(false, $"OnPickupInteraction(): Failed to retrieve message");
+
+            // Find item entity
+            Item item = Game.EntityManager.GetEntity<Item>(pickupInteraction.IdTarget);
+
+            // Make sure the item still exists and is not owned by item (multiple pickup interactions can be received due to lag)
+            if (item == null || Player.Owns(item))
+                return true;
+
+            // Add item to the player's inventory
+            Inventory inventory = Player.GetInventory(InventoryConvenienceLabel.General);
+            if (inventory == null) return Logger.WarnReturn(false, "OnPickupInteraction(): inventory == null");
+
+            InventoryResult result = item.ChangeInventoryLocation(inventory);
+            if (result != InventoryResult.Success)
+            {
+                Logger.Warn($"OnPickupInteraction(): Failed to add item {item} to inventory of player {Player}, reason: {result}");
+                return false;
+            }
+
+            // Cancel lifespan expiration for the picked up item
+            item.CancelScheduledLifespanExpireEvent();
+
+            // TODO: Remove RestrictedToPlayerGuid property once we have personal loot
+
+            return true;
+        }
+
+        private bool OnTryInventoryMove(MailboxMessage message) // 33
+        {
+            var tryInventoryMove = message.As<NetMessageTryInventoryMove>();
+            if (tryInventoryMove == null) return Logger.WarnReturn(false, $"OnTryInventoryMove(): Failed to retrieve message");
+
+            Logger.Trace(string.Format("OnTryInventoryMove(): {0} to containerId={1}, inventoryRef={2}, slot={3}, isStackSplit={4}",
+                tryInventoryMove.ItemId,
+                tryInventoryMove.ToInventoryOwnerId,
+                GameDatabase.GetPrototypeName((PrototypeId)tryInventoryMove.ToInventoryPrototype),
+                tryInventoryMove.ToSlot,
+                tryInventoryMove.IsStackSplit));
+
+            Entity entity = Game.EntityManager.GetEntity<Entity>(tryInventoryMove.ItemId);
+            if (entity == null) return Logger.WarnReturn(false, "OnTryInventoryMove(): entity == null");
+
+            Entity container = Game.EntityManager.GetEntity<Entity>(tryInventoryMove.ToInventoryOwnerId);
+            if (container == null) return Logger.WarnReturn(false, "OnTryInventoryMove(): container == null");
+
+            Inventory inventory = container.GetInventoryByRef((PrototypeId)tryInventoryMove.ToInventoryPrototype);
+            if (inventory == null) return Logger.WarnReturn(false, "OnTryInventoryMove(): inventory == null");
+
+            InventoryResult result = entity.ChangeInventoryLocation(inventory, tryInventoryMove.ToSlot);
+            if (result != InventoryResult.Success) return Logger.WarnReturn(false, $"OnTryInventoryMove(): Failed to change inventory location ({result})");
+
+            return true;
+        }
+
+        private bool OnInventoryTrashItem(MailboxMessage message)   // 35
+        {
+            var inventoryTrashItem = message.As<NetMessageInventoryTrashItem>();
+            if (inventoryTrashItem == null) return Logger.WarnReturn(false, $"OnInventoryTrashItem(): Failed to retrieve message");
+
+            // Validate item
+            if (inventoryTrashItem.ItemId == Entity.InvalidId) return Logger.WarnReturn(false, "OnInventoryTrashItem(): itemId == Entity.InvalidId");
+
+            var item = Game.EntityManager.GetEntity<Item>(inventoryTrashItem.ItemId);
+            if (item == null) return Logger.WarnReturn(false, "OnInventoryTrashItem(): item == null");
+
+            // Trash it
+            return Player.TrashItem(item);
+        }
+
+        private bool OnThrowInteraction(MailboxMessage message) // 36
+        {
+            var throwInteraction = message.As<NetMessageThrowInteraction>();
+            if (throwInteraction == null) return Logger.WarnReturn(false, $"OnThrowInteraction(): Failed to retrieve message");
+
+            ulong idTarget = throwInteraction.IdTarget;
+            int avatarIndex = throwInteraction.AvatarIndex;
+            Logger.Trace($"Received ThrowInteraction message Avatar[{avatarIndex}] Target[{idTarget}]");
+
+            Player.CurrentAvatar.StartThrowing(idTarget);
+
+            return true;
+        }
+
+        private bool OnPerformPreInteractPower(MailboxMessage message)  // 37
         {
             var performPreInteractPower = message.As<NetMessagePerformPreInteractPower>();
             if (performPreInteractPower == null) return Logger.WarnReturn(false, $"OnPerformPreInteractPower(): Failed to retrieve message");
 
             Logger.Trace($"Received PerformPreInteractPower for {performPreInteractPower.IdTarget}");
 
-            if (Game.EntityManager.TryGetEntityById(performPreInteractPower.IdTarget, out Entity interactObject))
+            var interactableObject = Game.EntityManager.GetEntity<Entity>(performPreInteractPower.IdTarget);
+            if (interactableObject == null) return Logger.WarnReturn(false, $"OnPerformPreInteractPower(): Failed to get entity {performPreInteractPower.IdTarget}");
+
+            if (_preInteractPowerEndEvent.IsValid == false)
             {
-                if (Game.EventManager.HasEvent(this, EventEnum.PreInteractPowerEnd) == false)
-                {
-                    Game.EventManager.AddEvent(this, EventEnum.PreInteractPower, 0, interactObject);
-                    Game.EventManager.AddEvent(this, EventEnum.PreInteractPowerEnd, 1000, interactObject); // ChargingTimeMS    
-                }
+                EventPointer<OLD_PreInteractPowerEvent> preInteractPowerEventPointer = new();
+                Game.GameEventScheduler.ScheduleEvent(preInteractPowerEventPointer, TimeSpan.Zero);
+                preInteractPowerEventPointer.Get().Initialize(this, interactableObject);
+
+                Game.GameEventScheduler.ScheduleEvent(_preInteractPowerEndEvent, TimeSpan.FromMilliseconds(1000));  // ChargingTimeMS
+                _preInteractPowerEndEvent.Get().Initialize(this, interactableObject);
             }
 
             return true;
         }
 
-        private bool OnUseInteractableObject(MailboxMessage message)
+        private bool OnUseInteractableObject(MailboxMessage message)    // 38
         {
             var useInteractableObject = message.As<NetMessageUseInteractableObject>();
             if (useInteractableObject == null) return Logger.WarnReturn(false, $"OnUseInteractableObject(): Failed to retrieve message");
@@ -348,103 +635,68 @@ namespace MHServerEmu.Games.Network
                 SendMessage(NetMessageMissionInteractRelease.DefaultInstance);
             }
 
-            if (Game.EntityManager.TryGetEntityById(useInteractableObject.IdTarget, out Entity interactableObject))
+            var interactableObject = Game.EntityManager.GetEntity<Entity>(useInteractableObject.IdTarget);
+            if (interactableObject == null) return Logger.WarnReturn(false, $"OnUseInteractableObject(): Failed to get entity {useInteractableObject.IdTarget}");
+
+            if (interactableObject is Transition teleport)
             {
-                if (interactableObject is Transition)
+                if (teleport.TransitionPrototype.Type == RegionTransitionType.ReturnToLastTown)
                 {
-                    Transition teleport = interactableObject as Transition;
-                    if (teleport.TransitionPrototype.Type == RegionTransitionType.ReturnToLastTown)
-                    {
-                        teleport.TeleportToLastTown(this);
-                        return true;
-                    }
-                    if (teleport.Destinations.Count == 0 || teleport.Destinations[0].Type == RegionTransitionType.Waypoint) return true;
-                    Logger.Trace($"Destination entity {teleport.Destinations[0].Entity}");
-
-                    if (teleport.Destinations[0].Type == RegionTransitionType.TowerUp ||
-                        teleport.Destinations[0].Type == RegionTransitionType.TowerDown)
-                    {
-                        teleport.TeleportToEntity(this, teleport.Destinations[0].EntityId);
-                        return true;
-                    }
-
-                    if (RegionDataRef != teleport.Destinations[0].Region)
-                    {
-                        teleport.TeleportClient(this);
-                        return true;
-                    }
-
-                    if (Game.EntityManager.GetTransitionInRegion(teleport.Destinations[0], teleport.RegionId) is not Transition target) return true;
-
-                    if (AOI.CheckTargeCell(target))
-                    {
-                        teleport.TeleportClient(this);
-                        return true;
-                    }
-
-                    var teleportEntity = target.TransitionPrototype;
-                    if (teleportEntity == null) return true;
-                    Vector3 targetPos = new(target.Location.GetPosition());
-                    Orientation targetRot = target.Location.GetOrientation();
-
-                    teleportEntity.CalcSpawnOffset(targetRot, targetPos);
-
-                    Logger.Trace($"Teleporting to {targetPos}");
-
-                    uint cellid = target.Properties[PropertyEnum.MapCellId];
-                    uint areaid = target.Properties[PropertyEnum.MapAreaId];
-                    Logger.Trace($"Teleporting to areaid {areaid} cellid {cellid}");
-
-                    SendMessage(NetMessageEntityPosition.CreateBuilder()
-                        .SetIdEntity(Player.CurrentAvatar.Id)
-                        .SetFlags(64)
-                        .SetPosition(targetPos.ToNetStructPoint3())
-                        .SetOrientation(targetRot.ToNetStructPoint3())
-                        .SetCellId(cellid)
-                        .SetAreaId(areaid)
-                        .SetEntityPrototypeId((ulong)Player.CurrentAvatar.BaseData.PrototypeId)
-                        .Build());
-
-                    LastPosition = targetPos;
+                    teleport.TeleportToLastTown(this);
+                    return true;
                 }
-                else
-                    Game.EventManager.AddEvent(this, EventEnum.UseInteractableObject, 0, interactableObject);
+                if (teleport.DestinationList.Count == 0 || teleport.DestinationList[0].Type == RegionTransitionType.Waypoint) return true;
+                Logger.Trace($"Destination entity {teleport.DestinationList[0].EntityRef}");
+
+                if (teleport.DestinationList[0].Type == RegionTransitionType.TowerUp ||
+                    teleport.DestinationList[0].Type == RegionTransitionType.TowerDown)
+                {
+                    teleport.TeleportToEntity(this, teleport.DestinationList[0].EntityId);
+                    return true;
+                }
+
+                if (RegionDataRef != teleport.DestinationList[0].RegionRef)
+                {
+                    teleport.TeleportClient(this);
+                    return true;
+                }
+
+                if (Game.EntityManager.GetTransitionInRegion(teleport.DestinationList[0], teleport.RegionId) is not Transition target) return true;
+
+                if (AOI.InterestedInCell(target.RegionLocation.Cell.Id) == false)
+                {
+                    teleport.TeleportClient(this);
+                    return true;
+                }
+
+                var teleportEntity = target.TransitionPrototype;
+                if (teleportEntity == null) return true;
+                Vector3 targetPos = target.RegionLocation.Position;
+                Orientation targetRot = target.RegionLocation.Orientation;
+
+                teleportEntity.CalcSpawnOffset(ref targetRot, ref targetPos);
+
+                Logger.Trace($"Teleporting to {targetPos}");
+
+                uint cellId = target.Properties[PropertyEnum.MapCellId];
+                uint areaId = target.Properties[PropertyEnum.MapAreaId];
+                Logger.Trace($"Teleporting to areaId={areaId} cellId={cellId}");
+
+                Player.CurrentAvatar.ChangeRegionPosition(targetPos, targetRot, ChangePositionFlags.Teleport);
+
+                LastPosition = targetPos;
+            }
+            else
+            {
+                EventPointer<OLD_UseInteractableObjectEvent> eventPointer = new();
+                Game.GameEventScheduler.ScheduleEvent(eventPointer, TimeSpan.Zero);
+                eventPointer.Get().Initialize(Player, interactableObject);
             }
 
             return true;
         }
 
-        private bool OnTryInventoryMove(MailboxMessage message)
-        {
-            var tryInventoryMove = message.As<NetMessageTryInventoryMove>();
-            if (tryInventoryMove == null) return Logger.WarnReturn(false, $"OnTryInventoryMove(): Failed to retrieve message");
-
-            Logger.Info($"Received TryInventoryMove message");
-
-            SendMessage(NetMessageInventoryMove.CreateBuilder()
-                .SetEntityId(tryInventoryMove.ItemId)
-                .SetInvLocContainerEntityId(tryInventoryMove.ToInventoryOwnerId)
-                .SetInvLocInventoryPrototypeId(tryInventoryMove.ToInventoryPrototype)
-                .SetInvLocSlot(tryInventoryMove.ToSlot)
-                .Build());
-
-            return true;
-        }
-
-        private bool OnThrowInteraction(MailboxMessage message)
-        {
-            var throwInteraction = message.As<NetMessageThrowInteraction>();
-            if (throwInteraction == null) return Logger.WarnReturn(false, $"OnThrowInteraction(): Failed to retrieve message");
-
-            ulong idTarget = throwInteraction.IdTarget;
-            int avatarIndex = throwInteraction.AvatarIndex;
-            Logger.Trace($"Received ThrowInteraction message Avatar[{avatarIndex}] Target[{idTarget}]");
-
-            Game.EventManager.AddEvent(this, EventEnum.StartThrowing, 0, idTarget);
-            return true;
-        }
-
-        private bool OnUseWaypoint(MailboxMessage message)
+        private bool OnUseWaypoint(MailboxMessage message)  // 40
         {
             var useWaypoint = message.As<NetMessageUseWaypoint>();
             if (useWaypoint == null) return Logger.WarnReturn(false, $"OnUseWaypoint(): Failed to retrieve message");
@@ -459,7 +711,7 @@ namespace MHServerEmu.Games.Network
             return true;
         }
 
-        private bool OnSwitchAvatar(MailboxMessage message)
+        private bool OnSwitchAvatar(MailboxMessage message) // 42
         {
             var switchAvatar = message.As<NetMessageSwitchAvatar>();
             if (switchAvatar == null) return Logger.WarnReturn(false, $"OnSwitchAvatar(): Failed to retrieve message");
@@ -467,19 +719,19 @@ namespace MHServerEmu.Games.Network
             Logger.Info($"Received NetMessageSwitchAvatar");
             Logger.Trace(switchAvatar.ToString());
 
-            // A hack for changing avatar in-game
-            Player.SetAvatar((PrototypeId)switchAvatar.AvatarPrototypeId);
-            //ChatHelper.SendMetagameMessage(_frontendClient, $"Changing avatar to {GameDatabase.GetFormattedPrototypeName(Player.CurrentAvatar.EntityPrototype.DataRef)}.");
-            Game.MovePlayerToRegion(this, RegionDataRef, WaypointDataRef);
+            // Start the avatar switching process
+            if (Player.BeginSwitchAvatar((PrototypeId)switchAvatar.AvatarPrototypeId) == false)
+                return Logger.WarnReturn(false, "OnSwitchAvatar(): Failed to begin avatar switch");
+
             return true;
         }
 
-        private bool OnAbilitySlotToAbilityBar(MailboxMessage message)
+        private bool OnAbilitySlotToAbilityBar(MailboxMessage message)  // 46
         {
             var slotToAbilityBar = message.As<NetMessageAbilitySlotToAbilityBar>();
             if (slotToAbilityBar == null) return Logger.WarnReturn(false, $"OnAbilitySlotToAbilityBar(): Failed to retrieve message");
 
-            var abilityKeyMapping = Player.CurrentAvatar.AbilityKeyMappings[0];
+            var abilityKeyMapping = Player.CurrentAvatar.CurrentAbilityKeyMapping;
             PrototypeId prototypeRefId = (PrototypeId)slotToAbilityBar.PrototypeRefId;
             AbilitySlot slotNumber = (AbilitySlot)slotToAbilityBar.SlotNumber;
             Logger.Trace($"NetMessageAbilitySlotToAbilityBar: {GameDatabase.GetFormattedPrototypeName(prototypeRefId)} to {slotNumber}");
@@ -489,12 +741,12 @@ namespace MHServerEmu.Games.Network
             return true;
         }
 
-        private bool OnAbilityUnslotFromAbilityBar(MailboxMessage message)
+        private bool OnAbilityUnslotFromAbilityBar(MailboxMessage message)  // 47
         {
             var unslotFromAbilityBar = message.As<NetMessageAbilityUnslotFromAbilityBar>();
             if (unslotFromAbilityBar == null) return Logger.WarnReturn(false, $"OnAbilityUnslotFromAbilityBar(): Failed to retrieve message");
 
-            var abilityKeyMapping = Player.CurrentAvatar.AbilityKeyMappings[0];
+            var abilityKeyMapping = Player.CurrentAvatar.CurrentAbilityKeyMapping;
             AbilitySlot slotNumber = (AbilitySlot)unslotFromAbilityBar.SlotNumber;
             Logger.Trace($"NetMessageAbilityUnslotFromAbilityBar: from {slotNumber}");
 
@@ -503,12 +755,12 @@ namespace MHServerEmu.Games.Network
             return true;
         }
 
-        private bool OnAbilitySwapInAbilityBar(MailboxMessage message)
+        private bool OnAbilitySwapInAbilityBar(MailboxMessage message)  // 48
         {
             var swapInAbilityBar = message.As<NetMessageAbilitySwapInAbilityBar>();
             if (swapInAbilityBar == null) return Logger.WarnReturn(false, $"OnAbilitySwapInAbilityBar(): Failed to retrieve message");
 
-            var abilityKeyMapping = Player.CurrentAvatar.AbilityKeyMappings[0];
+            var abilityKeyMapping = Player.CurrentAvatar.CurrentAbilityKeyMapping;
             AbilitySlot slotA = (AbilitySlot)swapInAbilityBar.SlotNumberA;
             AbilitySlot slotB = (AbilitySlot)swapInAbilityBar.SlotNumberB;
             Logger.Trace($"NetMessageAbilitySwapInAbilityBar: {slotA} and {slotB}");
@@ -521,13 +773,35 @@ namespace MHServerEmu.Games.Network
             return true;
         }
 
-        private bool OnGracefulDisconnect(MailboxMessage message)
+        private bool OnReturnToHub(MailboxMessage message)  // 55
+        {
+            var returnToHub = message.As<NetMessageReturnToHub>();
+            if (returnToHub == null) return Logger.WarnReturn(false, $"OnReturnToHub(): Failed to retrieve message");
+
+            Game.MovePlayerToRegion(this, (PrototypeId)RegionPrototypeId.AvengersTowerHUBRegion, (PrototypeId)WaypointPrototypeId.AvengersTowerHub);
+            return true;
+        }
+
+        private void OnNotifyLoadingScreenFinished(MailboxMessage message)  // 86
+        {
+            Player.IsOnLoadingScreen = false;
+        }
+
+        private bool OnPlayKismetSeqDone(MailboxMessage message)    // 96
+        {
+            var playKismetSeqDone = message.As<NetMessagePlayKismetSeqDone>();
+            if (playKismetSeqDone == null) return Logger.WarnReturn(false, $"OnNetMessagePlayKismetSeqDone(): Failed to retrieve message");
+            Player.OnPlayKismetSeqDone((PrototypeId)playKismetSeqDone.KismetSeqPrototypeId);
+            return true;
+        }
+
+        private bool OnGracefulDisconnect(MailboxMessage message)   // 98
         {
             SendMessage(NetMessageGracefulDisconnectAck.DefaultInstance);
             return true;
         }
 
-        private bool OnSetPlayerGameplayOptions(MailboxMessage message)
+        private bool OnSetPlayerGameplayOptions(MailboxMessage message) // 113
         {
             var setPlayerGameplayOptions = message.As<NetMessageSetPlayerGameplayOptions>();
             if (setPlayerGameplayOptions == null) return Logger.WarnReturn(false, $"OnSetPlayerGameplayOptions(): Failed to retrieve message");
@@ -537,13 +811,23 @@ namespace MHServerEmu.Games.Network
             return true;
         }
 
-        private bool OnRequestInterestInInventory(MailboxMessage message)
+        private bool OnRequestInterestInInventory(MailboxMessage message)   // 121
         {
             var requestInterestInInventory = message.As<NetMessageRequestInterestInInventory>();
             if (requestInterestInInventory == null) return Logger.WarnReturn(false, $"OnRequestInterestInInventory(): Failed to retrieve message");
 
-            string inventory = GameDatabase.GetFormattedPrototypeName((PrototypeId)requestInterestInInventory.InventoryProtoId);
-            Logger.Trace($"Received NetMessageRequestInterestInInventory for {inventory}");
+            PrototypeId inventoryProtoRef = (PrototypeId)requestInterestInInventory.InventoryProtoId;
+
+            Logger.Trace(string.Format("OnRequestInterestInInventory(): inventoryProtoId={0}, loadState={1}",
+                GameDatabase.GetPrototypeName(inventoryProtoRef),
+                requestInterestInInventory.LoadState));
+
+            // Validate inventory prototype
+            var inventoryPrototype = GameDatabase.GetPrototype<InventoryPrototype>((PrototypeId)requestInterestInInventory.InventoryProtoId);
+            if (inventoryPrototype == null) return Logger.WarnReturn(false, "OnRequestInterestInInventory(): inventoryPrototype == null");
+
+            if (Player.RevealInventory(inventoryProtoRef) == false)
+                return Logger.WarnReturn(false, $"OnRequestInterestInInventory(): Failed to reveal inventory {GameDatabase.GetPrototypeName(inventoryProtoRef)}");
 
             SendMessage(NetMessageInventoryLoaded.CreateBuilder()
                 .SetInventoryProtoId(requestInterestInInventory.InventoryProtoId)
@@ -553,17 +837,57 @@ namespace MHServerEmu.Games.Network
             return true;
         }
 
-        private bool OnRequestInterestInAvatarEquipment(MailboxMessage message)
+        private bool OnRequestInterestInAvatarEquipment(MailboxMessage message) // 123
         {
             var requestInterestInAvatarEquipment = message.As<NetMessageRequestInterestInAvatarEquipment>();
             if (requestInterestInAvatarEquipment == null) return Logger.WarnReturn(false, $"OnRequestInterestInAvatarEquipment(): Failed to retrieve message");
 
-            string avatar = GameDatabase.GetFormattedPrototypeName((PrototypeId)requestInterestInAvatarEquipment.AvatarProtoId);
-            Logger.Trace($"Received NetMessageRequestInterestInAvatarEquipment for {avatar}");
+            PrototypeId avatarProtoId = (PrototypeId)requestInterestInAvatarEquipment.AvatarProtoId;
+
+            Logger.Trace(string.Format("OnRequestInterestInAvatarEquipment(): avatarProtoId={0}, avatarModeEnum={1}",
+                GameDatabase.GetPrototypeName(avatarProtoId),
+                (AvatarMode)requestInterestInAvatarEquipment.AvatarModeEnum));
+
+            Avatar avatar = Player.GetAvatar(avatarProtoId);
+            if (avatar == null) return Logger.WarnReturn(false, "OnRequestInterestInAvatarEquipment(): avatar == null");
+
+            avatar.RevealEquipmentToOwner();
+
             return true;
         }
 
-        private bool OnOmegaBonusAllocationCommit(MailboxMessage message)
+        private bool OnRequestInterestInTeamUpEquipment(MailboxMessage message) // 124
+        {
+            var requestInterestInTeamUpEquipment = message.As<NetMessageRequestInterestInTeamUpEquipment>();
+            if (requestInterestInTeamUpEquipment == null) return Logger.WarnReturn(false, $"OnRequestRequestInterestInTeamUpEquipment(): Failed to retrieve message");
+
+            PrototypeId teamUpProtoId = (PrototypeId)requestInterestInTeamUpEquipment.TeamUpProtoId;
+
+            Logger.Trace(string.Format("OnRequestRequestInterestInTeamUpEquipment(): teamUpProtoId={0}",
+                GameDatabase.GetPrototypeName(teamUpProtoId)));
+
+            Agent teamUpAgent = Player.GetTeamUpAgent(teamUpProtoId);
+            if (teamUpAgent == null) return Logger.WarnReturn(false, "OnRequestRequestInterestInTeamUpEquipment(): teamUpAgent == null");
+
+            teamUpAgent.RevealEquipmentToOwner();
+
+            return true;
+        }
+
+        private void OnTryTeamUpSelect(MailboxMessage message)  // 125
+        {
+            var tryTeamUpSelect = message.As<NetMessageTryTeamUpSelect>();
+            Avatar avatar = Player.CurrentAvatar;
+            avatar.SelectTeamUpAgent((PrototypeId)tryTeamUpSelect.TeamUpPrototypeId);
+        }
+
+        private void OnRequestTeamUpDismiss(MailboxMessage message) // 126
+        {
+            Avatar avatar = Player.CurrentAvatar;
+            avatar.DismissTeamUpAgent();
+        }
+
+        private bool OnOmegaBonusAllocationCommit(MailboxMessage message)   // 132
         {
             var omegaBonusAllocationCommit = message.As<NetMessageOmegaBonusAllocationCommit>();
             if (omegaBonusAllocationCommit == null) return Logger.WarnReturn(false, $"OnOmegaBonusAllocationCommit(): Failed to retrieve message");
@@ -572,12 +896,26 @@ namespace MHServerEmu.Games.Network
             return true;
         }
 
-        private bool OnChangeCameraSettings(MailboxMessage message)
+        private bool OnAssignStolenPower(MailboxMessage message)    // 139
+        {
+            var assignStolenPower = message.As<NetMessageAssignStolenPower>();
+            if (assignStolenPower == null) return Logger.WarnReturn(false, $"OnAssignStolenPower(): Failed to retrieve message");
+
+            PrototypeId stealingPowerRef = (PrototypeId)assignStolenPower.StealingPowerProtoId;
+            PrototypeId stolenPowerRef = (PrototypeId)assignStolenPower.StolenPowerProtoId;
+
+            Avatar avatar = Player.CurrentAvatar;
+            avatar.Properties[PropertyEnum.AvatarMappedPower, stealingPowerRef] = stolenPowerRef;
+
+            return true;
+        }
+
+        private bool OnChangeCameraSettings(MailboxMessage message) // 148
         {
             var changeCameraSettings = message.As<NetMessageChangeCameraSettings>();
             if (changeCameraSettings == null) return Logger.WarnReturn(false, $"OnChangeCameraSettings(): Failed to retrieve message");
 
-            AOI.InitPlayerView((PrototypeId)changeCameraSettings.CameraSettings);
+            AOI.InitializePlayerView((PrototypeId)changeCameraSettings.CameraSettings);
             return true;
         }
 

@@ -56,10 +56,10 @@ namespace MHServerEmu.PlayerManagement
             if (Account == null)
                 return Logger.WarnReturn(false, $"RefreshAccount(): Account == null");
 
-            if (Account.Id == 0)
+            if (Account == AccountManager.DefaultAccount)
                 return Logger.InfoReturn(true, $"RefreshAccount(): Skipping for the default account");
 
-            if (DBManager.TryQueryAccountByEmail(Account.Email, out DBAccount freshAccount) == false)
+            if (AccountManager.DBManager.TryQueryAccountByEmail(Account.Email, out DBAccount freshAccount) == false)
                 return Logger.WarnReturn(false, $"RefreshAccount(): Failed to retrieve account data for {Account}");
 
             Account = freshAccount;

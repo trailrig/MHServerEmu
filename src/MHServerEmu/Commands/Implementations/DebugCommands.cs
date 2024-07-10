@@ -1,4 +1,5 @@
-﻿using MHServerEmu.Commands.Attributes;
+﻿using System.Text;
+using MHServerEmu.Commands.Attributes;
 using MHServerEmu.Core.Collisions;
 using MHServerEmu.Core.Helpers;
 using MHServerEmu.Core.Logging;
@@ -6,6 +7,9 @@ using MHServerEmu.DatabaseAccess.Models;
 using MHServerEmu.Frontend;
 using MHServerEmu.Games;
 using MHServerEmu.Games.Entities;
+using MHServerEmu.Games.Entities.Avatars;
+using MHServerEmu.Games.Events;
+using MHServerEmu.Games.Events.Templates;
 using MHServerEmu.Games.GameData;
 using MHServerEmu.Games.Navi;
 using MHServerEmu.Games.Network;
@@ -22,6 +26,15 @@ namespace MHServerEmu.Commands.Implementations
         public string Test(string[] @params, FrontendClient client)
         {
             return string.Empty;
+        }
+
+        [Command("forcegc", "Requests the garbage collector to reclaim unused server memory.", AccountUserLevel.Admin)]
+        public string ForceGC(string[] @params, FrontendClient client)
+        {
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+            
+            return "Manual garbage collection successfully requested.";
         }
 
         [Command("cell", "Shows current cell.", AccountUserLevel.User)]
@@ -98,11 +111,11 @@ namespace MHServerEmu.Commands.Implementations
             CommandHelper.TryGetGame(client, out Game game);
             var manager = game.EntityManager;
 
-            var entity = manager.GetEntityById(entityId1);
-            if (entity is not WorldEntity entity1) return $"No entity found for {entityId1}";
+            var entity1 = manager.GetEntity<WorldEntity>(entityId1);
+            if (entity1 == null) return $"No entity found for {entityId1}";
 
-            entity = manager.GetEntityById(entityId2);
-            if (entity is not WorldEntity entity2) return $"No entity found for {entityId2}";
+            var entity2 = manager.GetEntity<WorldEntity>(entityId2);
+            if (entity2 == null) return $"No entity found for {entityId2}";
 
             Bounds bounds = entity1.Bounds;
             bool isBlocked = Games.Regions.Region.IsBoundsBlockedByEntity(bounds, entity2, BlockingCheckFlags.CheckSpawns);
@@ -127,7 +140,7 @@ namespace MHServerEmu.Commands.Implementations
                 string name = worldEntity.PrototypeName;
                 ulong entityId = worldEntity.Id;
                 string status = string.Empty;
-                if (playerConnection.AOI.EntityLoaded(entityId) == false) status += "[H]";
+                if (playerConnection.AOI.InterestedInEntity(entityId) == false) status += "[H]";
                 if (worldEntity is Transition) status += "[T]";
                 if (worldEntity.WorldEntityPrototype.VisibleByDefault == false) status += "[Inv]";
                 entities.Add($"[E][{entityId}] {name} {status}");
@@ -179,10 +192,10 @@ namespace MHServerEmu.Commands.Implementations
 
             CommandHelper.TryGetGame(client, out Game game);
 
-            var entity = game.EntityManager.GetEntityById(entityId);
+            var entity = game.EntityManager.GetEntity<Entity>(entityId);
             if (entity == null) return "No entity found.";
 
-            ChatHelper.SendMetagameMessage(client, $"Entity[{entityId}]: {GameDatabase.GetFormattedPrototypeName(entity.BaseData.PrototypeId)}");
+            ChatHelper.SendMetagameMessage(client, $"Entity[{entityId}]: {GameDatabase.GetFormattedPrototypeName(entity.PrototypeDataRef)}");
             ChatHelper.SendMetagameMessageSplit(client, entity.Properties.ToString(), false);
             if (entity is WorldEntity worldEntity)
             {
@@ -190,6 +203,56 @@ namespace MHServerEmu.Commands.Implementations
                 ChatHelper.SendMetagameMessageSplit(client, worldEntity.PowerCollectionToString(), false);
             }
             return string.Empty;
+        }
+
+        [Command("powers", "Prints all powers assigned to the current avatar.", AccountUserLevel.User)]
+        public string Powers(string[] @params, FrontendClient client)
+        {
+            if (client == null) return "You can only invoke this command from the game.";
+            CommandHelper.TryGetPlayerConnection(client, out PlayerConnection playerConnection);
+            Avatar avatar = playerConnection.Player.CurrentAvatar;
+
+            StringBuilder sb = new();
+            foreach (var kvp in avatar.PowerCollection)
+                sb.AppendLine(kvp.Value.PowerPrototype.ToString());
+
+            if (sb.Length == 0) return $"No powers are assigned to {avatar}.";
+            
+            ChatHelper.SendMetagameMessage(client, $"Powers assigned to {avatar}:");
+            ChatHelper.SendMetagameMessageSplit(client, sb.ToString(), false);
+
+            return string.Empty;
+        }
+
+        [Command("scheduletestevent", "Schedules a test event.", AccountUserLevel.Admin)]
+        public string ScheduleTestEvent(string[] @params, FrontendClient client)
+        {
+            if (client == null) return "You can only invoke this command from the game.";
+
+            CommandHelper.TryGetGame(client, out Game game);
+
+            TestEventClass test = new();
+            test.ScheduleEvent(game, client, string.Join(' ', @params));
+
+            return $"Test event scheduled";
+        }
+
+        private class TestEventClass
+        {
+            public class TestEvent : CallMethodEventParam2<TestEventClass, FrontendClient, string>
+                { protected override CallbackDelegate GetCallback() => (t, p1, p2) => t.EventCallback(p1, p2); }
+            private EventPointer<TestEvent> _testEvent = new();
+
+            public void ScheduleEvent(Game game, FrontendClient client, string message)
+            {
+                game.GameEventScheduler.ScheduleEvent(_testEvent, TimeSpan.FromSeconds(3));
+                _testEvent.Get().Initialize(this, client, message);
+            }
+
+            public void EventCallback(FrontendClient client, string message)
+            {
+                ChatHelper.SendMetagameMessage(client, message);
+            }
         }
     }
 }

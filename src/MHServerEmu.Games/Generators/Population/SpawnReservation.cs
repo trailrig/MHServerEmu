@@ -1,9 +1,10 @@
-﻿using MHServerEmu.Games.GameData.Prototypes;
-using MHServerEmu.Games.GameData;
-using MHServerEmu.Games.Regions;
-using System.Text;
+﻿using System.Text;
 using MHServerEmu.Core.Collisions;
 using MHServerEmu.Core.VectorMath;
+using MHServerEmu.Games.Common.SpatialPartitions;
+using MHServerEmu.Games.GameData;
+using MHServerEmu.Games.GameData.Prototypes;
+using MHServerEmu.Games.Regions;
 
 namespace MHServerEmu.Games.Generators.Population
 {
@@ -78,5 +79,19 @@ namespace MHServerEmu.Games.Generators.Population
         {
             return (int)Cell.Id * 1000 + Id;
         }
+    }
+
+    public class SpawnReservationSpatialPartitionLocation : QuadtreeLocation<SpawnReservation>
+    {
+        public SpawnReservationSpatialPartitionLocation(SpawnReservation element) : base(element) { }
+        public override Aabb GetBounds() => Element.RegionBounds;
+    }
+
+    public class SpawnReservationSpatialPartition : Quadtree<SpawnReservation>
+    {
+        public SpawnReservationSpatialPartition(in Aabb bound) : base(bound, 128.0f) { }
+
+        public override QuadtreeLocation<SpawnReservation> GetLocation(SpawnReservation element) => element.SpatialPartitionLocation;
+        public override Aabb GetElementBounds(SpawnReservation element) => element.RegionBounds;
     }
 }

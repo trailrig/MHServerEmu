@@ -1,4 +1,5 @@
-﻿using MHServerEmu.Core.Collisions;
+﻿using MHServerEmu.Core.Collections;
+using MHServerEmu.Core.Collisions;
 using MHServerEmu.Core.Logging;
 using MHServerEmu.Core.System.Random;
 using MHServerEmu.Core.VectorMath;
@@ -68,7 +69,7 @@ namespace MHServerEmu.Games.Generators.Population
                 return Enumerable.Empty<SpawnReservation>();
         }
 
-        public void InitializeSpacialPartition(Aabb bound)
+        public void InitializeSpacialPartition(in Aabb bound)
         {
             if (_reservationOctree != null) return;
             _reservationOctree = new (bound);
@@ -102,7 +103,7 @@ namespace MHServerEmu.Games.Generators.Population
                 {
                     var filterRef = GameDatabase.GetDataRefByPrototypeGuid(entityMarker.FilterGuid);
 
-                    if (cell.GetRegion().CheckMarkerFilter(filterRef))
+                    if (cell.Region.CheckMarkerFilter(filterRef))
                     {
                         if (entityMarker.EntityGuid == 0) continue;
                         var markerRef = GameDatabase.GetDataRefByPrototypeGuid(entityMarker.EntityGuid);
@@ -345,13 +346,15 @@ namespace MHServerEmu.Games.Generators.Population
 
             return null;
         }
-    }
 
-    public class SpawnSpec
-    {
-        public static bool? SnapToFloorConvert(bool overrideSnapToFloor, bool overrideSnapToFloorValue)
+        public int CalcFreeReservation(PrototypeId markerRef, PrototypeId spawnAreaRef)
         {
-            return overrideSnapToFloor ? overrideSnapToFloorValue : null;
+            int count = 0;
+            if (_areaLookup.TryGetValue(spawnAreaRef, out var spawnMap) && spawnMap != null)
+                if (spawnMap.TryGetValue(markerRef, out var list) == false && list != null) 
+                    foreach (var testReservation in list)
+                        if (testReservation.State == MarkerState.Free) count++;
+            return count;
         }
     }
 }

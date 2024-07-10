@@ -1,11 +1,12 @@
-﻿using MHServerEmu.Core.Logging;
-using MHServerEmu.Core.System.Random;
-using MHServerEmu.Games.GameData.Prototypes;
-using MHServerEmu.Games.GameData;
-using MHServerEmu.Games.Regions;
-using MHServerEmu.Games.GameData.Prototypes.Markers;
+﻿using MHServerEmu.Core.Collections;
 using MHServerEmu.Core.Collisions;
+using MHServerEmu.Core.Logging;
+using MHServerEmu.Core.System.Random;
 using MHServerEmu.Core.VectorMath;
+using MHServerEmu.Games.GameData;
+using MHServerEmu.Games.GameData.Prototypes;
+using MHServerEmu.Games.GameData.Prototypes.Markers;
+using MHServerEmu.Games.Regions;
 
 namespace MHServerEmu.Games.Generators
 {
@@ -289,11 +290,11 @@ namespace MHServerEmu.Games.Generators
 
             int numCells = 0;
 
-            foreach (var cellRef in GameDatabase.DataDirectory.IteratePrototypesInHierarchy(typeof(CellPrototype)))
+            foreach (var cellRef in GameDatabase.DataDirectory.IteratePrototypesInHierarchy<CellPrototype>())
             {                
                 if (IsInCellSet(cellSetEntry, cellSetPath, cellRef))
                 {
-                    CellPrototype cell = GameDatabase.GetPrototype<CellPrototype>(cellRef);
+                    CellPrototype cell = cellRef.As<CellPrototype>();
                     //Logger.Debug($"0x{cell.DataRef:X16}i64 [{cell.DataRef}] {GameDatabase.GetPrototypeName(cell.DataRef)}");
                     cells.Add(cellRef);
                     CellBounds = cell.BoundingBox;

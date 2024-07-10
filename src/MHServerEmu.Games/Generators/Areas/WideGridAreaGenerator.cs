@@ -1,14 +1,15 @@
 ﻿using System.Reflection;
+using MHServerEmu.Core.Collections;
+using MHServerEmu.Core.Collisions;
 using MHServerEmu.Core.Extensions;
 using MHServerEmu.Core.System.Random;
+using MHServerEmu.Core.VectorMath;
 using MHServerEmu.Games.GameData.Prototypes;
 using MHServerEmu.Games.GameData;
 using MHServerEmu.Games.Generators.Regions;
 using MHServerEmu.Games.Regions;
 using static MHServerEmu.Games.Generators.Areas.CellGridGenerator;
 using static MHServerEmu.Games.Regions.Cell;
-using MHServerEmu.Core.Collisions;
-using MHServerEmu.Core.VectorMath;
 
 namespace MHServerEmu.Games.Generators.Areas
 {
@@ -151,13 +152,13 @@ namespace MHServerEmu.Games.Generators.Areas
             return true;
         }
 
-        private static Walls GetPointInPattern(Walls[] pattern, int px, int py, Square bounds, int rotation)
+        private static Walls GetPointInPattern(Walls[] pattern, int px, int py, in Square bounds, int rotation)
         {
             if (rotation < 0 || rotation >= 4) return 0;
             return WallsRotate(pattern[py * bounds.Width + px], rotation * 2);
         }
 
-        private static Cell.Type FindPatternAtPoint(GenCellGridContainer container, int x, int y, Walls[] pattern, Walls[] newPattern, Square bounds)
+        private static Cell.Type FindPatternAtPoint(GenCellGridContainer container, int x, int y, Walls[] pattern, Walls[] newPattern, in Square bounds)
         {
             Cell.Type type = Cell.Type.NESW;
 
@@ -204,7 +205,7 @@ namespace MHServerEmu.Games.Generators.Areas
             return type & Cell.Type.NESW;
         }
 
-        private static bool CheckPoint(GenCellGridContainer container, int cx, int cy, Walls[] pattern, Walls[] newPattern, int px, int py, Square bounds, int rotation)
+        private static bool CheckPoint(GenCellGridContainer container, int cx, int cy, Walls[] pattern, Walls[] newPattern, int px, int py, in Square bounds, int rotation)
         {
             if (rotation < 0 || rotation >= 4 || pattern == null || newPattern == null) return false;
             GenCell cell = container.GetCell(cx, cy, false);
@@ -222,7 +223,7 @@ namespace MHServerEmu.Games.Generators.Areas
             return false;
         }
 
-        private static bool FindWallPattern(GenCellGridContainer container, Walls[] pattern, Walls[] newPattern, Square bounds, List<PatternHit> hits)
+        private static bool FindWallPattern(GenCellGridContainer container, Walls[] pattern, Walls[] newPattern, in Square bounds, List<PatternHit> hits)
         {
             for (int y = 0; y < container.Height; y++)
             {
@@ -285,7 +286,7 @@ namespace MHServerEmu.Games.Generators.Areas
                             CellSettings cellSettings = new()
                             {
                                 CellRef = genCell.CellRef,
-                                PositionInArea = new(genCell.Position),
+                                PositionInArea = genCell.Position,
                                 Seed = ++randomSeed,
                                 ConnectedCells = connectedCells,
                                 PopulationThemeOverrideRef = genCell.PopulationThemeOverrideRef
@@ -315,7 +316,7 @@ namespace MHServerEmu.Games.Generators.Areas
                             CellSettings cellSettings = new()
                             {
                                 CellRef = cellRef,
-                                PositionInArea = new(genCell.Position),
+                                PositionInArea = genCell.Position,
                                 Seed = ++randomSeed,
                                 ConnectedCells = connectedCells,
                                 PopulationThemeOverrideRef = genCell.PopulationThemeOverrideRef
@@ -369,7 +370,7 @@ namespace MHServerEmu.Games.Generators.Areas
                 CellSettings cellSettings = new()
                 {
                     CellRef = cellRef,
-                    PositionInArea = new(position)
+                    PositionInArea = position
                 };
                 return Area.AddCell(AllocateCellId(), cellSettings) != null;
             }

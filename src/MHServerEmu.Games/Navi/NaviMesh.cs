@@ -1,11 +1,13 @@
-﻿using MHServerEmu.Core.Collisions;
+﻿using System.Text;
+using MHServerEmu.Core.Collections;
+using MHServerEmu.Core.Collisions;
 using MHServerEmu.Core.Extensions;
+using MHServerEmu.Core.Logging;
 using MHServerEmu.Core.VectorMath;
-using MHServerEmu.Games.Common;
+using MHServerEmu.Games.Entities;
 using MHServerEmu.Games.GameData;
 using MHServerEmu.Games.GameData.Prototypes;
 using MHServerEmu.Games.Regions;
-using System.Text;
 
 namespace MHServerEmu.Games.Navi
 {
@@ -23,6 +25,7 @@ namespace MHServerEmu.Games.Navi
             public NaviPatchPrototype Patch;
         }
 
+        private static readonly Logger Logger = LogManager.CreateLogger();
         private readonly NaviSystem _navi;
 
         public Aabb Bounds { get; private set; }
@@ -54,7 +57,7 @@ namespace MHServerEmu.Games.Navi
             _modifyMeshPatchesProjZ = new();
         }
 
-        public void Initialize(Aabb bounds, float padding, Region region)
+        public void Initialize(in Aabb bounds, float padding, Region region)
         {
             Release();
             Bounds = bounds;
@@ -77,7 +80,7 @@ namespace MHServerEmu.Games.Navi
             AddSuperQuad(Bounds, padding);
         }
 
-        private void AddSuperQuad(Aabb bounds, float padding)
+        private void AddSuperQuad(in Aabb bounds, float padding)
         {
             float xMin = bounds.Min.X - padding;
             float xMax = bounds.Max.X + padding;
@@ -184,7 +187,7 @@ namespace MHServerEmu.Games.Navi
 
         private void MergeMeshConnections() {}
 
-        public bool ModifyMesh(Transform3 transform, NaviPatchPrototype patch, bool projZ)
+        public bool ModifyMesh(in Transform3 transform, NaviPatchPrototype patch, bool projZ)
         {
             if (patch.Points.IsNullOrEmpty()) return true;
 
@@ -244,7 +247,7 @@ namespace MHServerEmu.Games.Navi
             triangle.ContentFlagCounts.Set(state.FlagCounts);
             triangle.PathingFlags = pathFlags;
             triangle.SetFlag(NaviTriangleFlags.Markup);
-            //int t = 0; int e = 0;
+
             while (stateStack.Count > 0)
             {
                 state = stateStack.Pop();
@@ -366,7 +369,7 @@ namespace MHServerEmu.Games.Navi
             IsMarkupValid = false;
         }
 
-        public bool Stitch(NaviPatchPrototype patch, Transform3 transform)
+        public bool Stitch(NaviPatchPrototype patch, in Transform3 transform)
         {
             if (patch.Points.HasValue())
             {
@@ -380,7 +383,7 @@ namespace MHServerEmu.Games.Navi
             return true;
         }
 
-        public bool StitchProjZ(NaviPatchPrototype patch, Transform3 transform)
+        public bool StitchProjZ(NaviPatchPrototype patch, in Transform3 transform)
         {
             if (patch.Points.HasValue())
             {
@@ -404,6 +407,255 @@ namespace MHServerEmu.Games.Navi
                 return NaviUtil.NaviInteriorContainsCircle(NaviCdt, position, radius, triangle, flagsCheck);
 
             return false;
+        }
+
+        public Vector3 ProjectToMesh(Vector3 regionPos)
+        {
+            var triangle = NaviCdt.FindTriangleAtPoint(regionPos);
+            return NaviUtil.ProjectToPlane(triangle, regionPos);
+        }
+
+        public void SetBlackOutZone(Vector3 center, float radius)
+        {
+            var triangle = NaviCdt.FindTriangleAtPoint(center);
+            if (triangle == null) return;
+            triangle.PathingFlags |= PathFlags.BlackOutZone;
+            Stack<NaviTriangle> triStack = new();
+            var naviSerialCheck = new NaviSerialCheck(NaviCdt);
+            float radiousSq = radius * radius;
+            triStack.Push(triangle);
+            while (triStack.Count > 0)
+            {
+                var tri = triStack.Pop();
+                for (int edgeIndex = 0; edgeIndex < 3; edgeIndex++)
+                {
+                    var edge = tri.Edges[edgeIndex];
+                    if (edge.TestOperationSerial(naviSerialCheck) == false) continue;
+                    var triOppo = edge.OpposedTriangle(tri);
+                    if (triOppo != null && Vector3.DistanceSquared2D(center, triOppo.Centroid()) < radiousSq) 
+                    {
+                        triOppo.PathingFlags |= PathFlags.BlackOutZone;
+                        triStack.Push(triOppo);
+                    }
+                }
+            }
+        }
+
+        public float CalcSpawnableArea(in Aabb bound)
+        {
+            float spawnableArea = 0.0f;
+            var triangle = NaviCdt.FindTriangleAtPoint(bound.Center);
+            if (triangle == null) return spawnableArea;
+            spawnableArea += triangle.CalcSpawnableArea();
+            Stack<NaviTriangle> triStack = new();
+            var naviSerialCheck = new NaviSerialCheck(NaviCdt);
+            triStack.Push(triangle);
+            while (triStack.Count > 0)
+            {
+                var tri = triStack.Pop();
+                for (int edgeIndex = 0; edgeIndex < 3; edgeIndex++)
+                {
+                    var edge = tri.Edges[edgeIndex];
+                    if (edge.TestOperationSerial(naviSerialCheck) == false) continue;
+                    var triOppo = edge.OpposedTriangle(tri);
+                    if (triOppo!= null && bound.IntersectsXY(triOppo.Centroid()))
+                    {
+                        spawnableArea += tri.CalcSpawnableArea();
+                        triStack.Push(triOppo);
+                    }
+                }
+            }
+            return spawnableArea;
+        }
+
+        public bool AddInfluence(Vector3 position, float radius, NavigationInfluence outInfluence)
+        {
+            NaviPoint point = NaviCdt.AddPointProjZ(position, false);
+            if (point != null)
+            {
+                if (point.InfluenceRef == sbyte.MaxValue) return false;
+                return AddInfluenceHelper(point, radius, outInfluence);
+            }
+            return true;
+        }
+
+        private bool AddInfluenceHelper(NaviPoint point, float radius, NavigationInfluence outInfluence)
+        {
+            if (outInfluence.Point != null) return false;            
+            NaviTriangle foundTriangle = NaviCdt.FindTriangleContainingVertex(point);
+            if (foundTriangle == null) return false;
+            if (NaviUtil.IsPointConstraint(point, foundTriangle) == false)
+            {
+                if (point.InfluenceRef++ == 0) point.InfluenceRadius = radius;
+                outInfluence.Point = point;
+                outInfluence.Triangle = foundTriangle;
+            }            
+            return true;
+        }
+
+        public bool UpdateInfluence(NavigationInfluence inoutInfluence, Vector3 position, float radius)
+        {
+            if (inoutInfluence.Point == null || inoutInfluence.Point.TestFlag(NaviPointFlags.Attached) == false) return false;
+            if (inoutInfluence.Point.InfluenceRef <= 0)
+            {
+                NaviSystem.Logger.Warn($"UpdateInfluence failed POINT={inoutInfluence.Point}");
+                return false;
+            }
+
+            NaviPoint point = NaviCdt.FindCachedPointAtPoint(position);
+            if (point != null)
+            {
+                if (point.TestFlag(NaviPointFlags.Attached))
+                {
+                    if (point != inoutInfluence.Point)
+                    {
+                        if (RemoveInfluence(inoutInfluence) == false || AddInfluenceHelper(point, radius, inoutInfluence) == false)
+                            return false;
+                    }
+                    else
+                        point.InfluenceRadius = radius;
+                }
+                else
+                {
+                    if (RemoveInfluence(inoutInfluence) == false || AddInfluence(position, radius, inoutInfluence) == false)
+                        return false;
+                }
+            }
+            else
+            {
+                NaviTriangle triangle = inoutInfluence.Triangle;
+                if (triangle.TestFlag(NaviTriangleFlags.Attached) == false)
+                    triangle = NaviCdt.FindTriangleContainingVertex(inoutInfluence.Point);
+
+                if (triangle == null || !triangle.Contains(inoutInfluence.Point)) return false;
+                inoutInfluence.Triangle = triangle;
+
+                if (inoutInfluence.Point.InfluenceRef == 1 &&
+                    NaviCdt.AttemptCheapVertexPositionUpdate(inoutInfluence.Triangle, inoutInfluence.Point, position))
+                {
+                    return true;
+                }
+                else
+                {
+                    if (RemoveInfluence(inoutInfluence) == false || AddInfluence(position, radius, inoutInfluence) == false)
+                        return false;
+                }
+            }
+
+            return true;
+        }
+
+        public bool RemoveInfluence(NavigationInfluence inoutInfluence)
+        {
+            if (inoutInfluence.Point != null)
+            {
+                NaviPoint influencePoint = inoutInfluence.Point;
+                NaviTriangle influenceTriangle = inoutInfluence.Triangle;
+
+                inoutInfluence.Point = null;
+                inoutInfluence.Triangle = null;
+
+                if (influencePoint.TestFlag(NaviPointFlags.Attached) == false) return false;
+                if (influencePoint.InfluenceRef <= 0) 
+                {
+                    NaviSystem.Logger.Warn($"RemoveInfluence failed POINT={influencePoint}");
+                    return false;
+                }
+
+                if (--influencePoint.InfluenceRef == 0)
+                {
+                    NaviTriangle triangle = influenceTriangle;
+                    if (triangle.TestFlag(NaviTriangleFlags.Attached) == false)
+                        triangle = NaviCdt.FindTriangleContainingVertex(influencePoint);
+                    if (triangle == null) return false;
+
+                    influencePoint.InfluenceRadius = 0f;
+
+                    NaviCdt.RemovePoint(influencePoint, triangle);
+                    NaviVertexLookupCache.RemoveVertex(influencePoint);
+                }
+            }
+
+            return true;
+        }
+
+        public SweepResult Sweep(Vector3 fromPosition, Vector3 toPosition, float radius, PathFlags pathFlags, ref Vector3? resultPosition, ref Vector3? resultNormal,
+            float padding = 0, HeightSweepType heightSweep = HeightSweepType.None, int maxHeight = short.MaxValue, int minHeight = short.MinValue, Entity owner = null)
+        {
+            NaviTriangle currentTriangle = NaviCdt.FindTriangleAtPoint(fromPosition);
+            if (currentTriangle == null)
+            {
+                Logger.Error($"Navi sweep failed to find starting triangle at point: {fromPosition} for mesh: {ToString()}");
+                resultPosition = Vector3.Zero;
+                return SweepResult.Failed;
+            }
+            if (_region == null)
+            {
+                resultPosition = Vector3.Zero;
+                return SweepResult.Failed;
+            }
+            NaviSweep naviSweep = new (this, _region, pathFlags, radius, fromPosition, currentTriangle, toPosition, owner, heightSweep, maxHeight, minHeight);
+            SweepResult resultSweep = naviSweep.DoSweep(ref resultPosition, ref resultNormal, padding);
+            return resultSweep;
+        }
+
+        public PointOnLineResult FindPointOnLineToOccupy(ref Vector3 resultPosition, Vector3 startPosition, Vector3 desiredPosition, float maxRange,
+            Bounds bounds, PathFlags pathFlags, BlockingCheckFlags blockFlags, bool skipTarget)
+        {
+            resultPosition = startPosition;
+
+            if (_region == null || !Vector3.IsFinite(startPosition) || !Vector3.IsFinite(desiredPosition))
+                return PointOnLineResult.Failed;
+
+            float radius = bounds.GetRadius();
+            if (radius <= 0.0f)
+            {
+                Logger.Debug("This implementation of FindPointOnLineToOccupy requires a radius.");
+                return PointOnLineResult.Failed;
+            }
+
+            maxRange += radius;
+            Vector3 targetVector = desiredPosition - startPosition;
+            Vector3.SafeNormalAndLength2D(targetVector, out Vector3 targetDirection, out float targetLength);
+            float targetDistance = Math.Min(targetLength, maxRange);
+            Vector3 targetPosition = startPosition + targetDirection * targetDistance;
+
+            Bounds checkBounds = new (bounds);
+            float stepSize = radius / 2.0f;
+            for (int step = 0; step < 250; step++)
+            {
+                float stepDistance = step * stepSize;
+                bool stepBack = targetDistance - stepDistance > -stepSize;
+                bool stepForward = skipTarget == false && targetDistance + stepDistance < maxRange + stepSize;
+
+                if (stepBack)
+                {
+                    float stepBackDistance = Math.Min(stepDistance, targetDistance);
+                    checkBounds.Center = targetPosition - targetDirection * stepBackDistance;
+                    if (_region.IsLocationClear(checkBounds, pathFlags, PositionCheckFlags.CanBeBlockedEntity, blockFlags))
+                    {
+                        resultPosition = checkBounds.Center;
+                        return step == 0 ? PointOnLineResult.Success : PointOnLineResult.Clipped;
+                    }
+                }
+
+                if (stepForward)
+                {
+                    float stepForwardDistance = Math.Min(stepDistance, maxRange);
+                    checkBounds.Center = targetPosition + targetDirection * stepForwardDistance;
+                    if (_region.IsLocationClear(checkBounds, pathFlags, PositionCheckFlags.CanBeBlockedEntity, blockFlags))
+                    {
+                        resultPosition = checkBounds.Center;
+                        return step == 0 ? PointOnLineResult.Success : PointOnLineResult.Clipped;
+                    }
+                }
+
+                if (stepBack == false && stepForward == false)
+                    return PointOnLineResult.Failed;
+            }
+
+            Logger.Debug($"NaviMesh.FindPointOnLineToOccupy loop protection fired. maxRange={maxRange} radius={radius} startPosition={startPosition} desiredPosition={desiredPosition}");
+            return PointOnLineResult.Failed;
         }
 
         private class MarkupState

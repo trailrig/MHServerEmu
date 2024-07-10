@@ -1,7 +1,9 @@
-﻿using MHServerEmu.Games.Entities.Avatars;
-using MHServerEmu.Games.Entities;
-using System.Collections;
+﻿using System.Collections;
 using MHServerEmu.Core.Collisions;
+using MHServerEmu.Core.Logging;
+using MHServerEmu.Games.Common.SpatialPartitions;
+using MHServerEmu.Games.Entities;
+using MHServerEmu.Games.Entities.Avatars;
 
 namespace MHServerEmu.Games.Generators
 {
@@ -10,34 +12,44 @@ namespace MHServerEmu.Games.Generators
     {
         ActivePartition = 1 << 0,
         StaticPartition = 1 << 1,
-        PlayersPartition = 1 << 2
+        PlayersPartition = 1 << 2,
+        All = ActivePartition | StaticPartition | PlayersPartition
     }
 
-    public class EntityRegionSPContext
+    public readonly struct EntityRegionSPContext
     {
-        public EntityRegionSPContextFlags Flags;
-        public ulong PlayerRestrictedGuid;
+        public readonly EntityRegionSPContextFlags Flags;
+        public readonly ulong PlayerRestrictedGuid;
 
-        public EntityRegionSPContext(EntityRegionSPContextFlags flags = EntityRegionSPContextFlags.ActivePartition | EntityRegionSPContextFlags.StaticPartition)
+        public EntityRegionSPContext()
+        {
+            Flags = EntityRegionSPContextFlags.ActivePartition | EntityRegionSPContextFlags.StaticPartition;
+            PlayerRestrictedGuid = 0;
+        }
+
+        public EntityRegionSPContext(EntityRegionSPContextFlags flags, ulong playerRestrictedGuid = 0)
         {
             Flags = flags;
+            PlayerRestrictedGuid = playerRestrictedGuid;
         }
     }
 
     public class EntityRegionSpatialPartition
     {
+        private static readonly Logger Logger = LogManager.CreateLogger();
+
         private WorldEntityRegionSpatialPartition _staticSpatialPartition;
         private WorldEntityRegionSpatialPartition _activeSpatialPartition;
-        private HashSet<Avatar> _avatars;
+        private List<Avatar> _avatars;
         private Dictionary<ulong, WorldEntityRegionSpatialPartition> _players;
         private Aabb _bounds;
         private float _minRadius;
         public int AvatarIteratorCount { get; protected set; }
         public int TotalElements { get; protected set; }
 
-        public EntityRegionSpatialPartition(Aabb bound, float minRadius = 64.0f)
+        public EntityRegionSpatialPartition(in Aabb bound, float minRadius = 64.0f)
         {
-            _bounds = new(bound);
+            _bounds = bound;
             _minRadius = minRadius;
             _staticSpatialPartition = new(bound, minRadius, EntityRegionSPContextFlags.StaticPartition);
             _activeSpatialPartition = new(bound, minRadius, EntityRegionSPContextFlags.ActivePartition);
@@ -60,9 +72,10 @@ namespace MHServerEmu.Games.Generators
                 if (node != null)
                 {
                     var tree = node.Tree;
-                    if (tree != null)
-                        return tree.Update(element);
+                    if (tree == null) return Logger.WarnReturn(false, "Update(): tree == null");
+                    return tree.Update(element);
                 }
+
                 return false;
             }
         }
@@ -118,9 +131,9 @@ namespace MHServerEmu.Games.Generators
             return result;
         }
 
-        public static bool DoesSphereContainAvatar(Sphere sphere, Avatar avatar)
+        public static bool DoesSphereContainAvatar(in Sphere sphere, Avatar avatar)
         {
-            if (avatar != null && sphere.Intersects(avatar.Location.GetPosition())) return true;
+            if (avatar != null && sphere.Intersects(avatar.RegionLocation.Position)) return true;
             return false;
         }
 
@@ -214,19 +227,103 @@ namespace MHServerEmu.Games.Generators
                 iterator.Clear();
             }
         }
+
+        public IEnumerable<Avatar> IterateAvatarsInVolume(Sphere volume)
+        {
+            var iterator = new RegionAvatarIterator(this, volume);
+
+            try
+            {
+                while (iterator.End() == false)
+                {
+                    var element = iterator.Current;
+                    iterator.MoveNext();
+                    yield return element;
+                }
+            }
+            finally
+            {
+                iterator.Clear();
+            }
+        }
+
+        public void GetElementsInVolume<B>(List<WorldEntity> elements, B volume, EntityRegionSPContext context) where B : IBounds
+        {
+            foreach (var element in IterateElementsInVolume(volume, context))
+                elements.Add(element);
+        }
+
+        public class RegionAvatarIterator : IEnumerator<Avatar>
+        {
+            private EntityRegionSpatialPartition _spatialPartition;
+            private Sphere _volume;
+            private int _current;
+
+            public RegionAvatarIterator(EntityRegionSpatialPartition spatialPartition, in Sphere volume)
+            {
+                _spatialPartition = spatialPartition;
+                _volume = volume;
+                _current = 0;
+
+                IncrementIteratorCount();
+                if (_spatialPartition != null)
+                {
+                    for (int index = 0; index < _spatialPartition._avatars.Count; index++)
+                    {
+                        Avatar entity = _spatialPartition._avatars[index];
+                        if (entity != null && DoesSphereContainAvatar(_volume, entity))
+                        {
+                            _current = index;
+                            return;
+                        }
+                    }
+                    _current = int.MaxValue;
+                }
+            }
+
+            public bool MoveNext()
+            {
+                if (_spatialPartition != null && _current < _spatialPartition._avatars.Count)
+                {
+                    _current++;
+                    for (; _current < _spatialPartition._avatars.Count; _current++)
+                    {
+                        Avatar entity = _spatialPartition._avatars[_current];
+                        if (entity != null && DoesSphereContainAvatar(_volume, entity))
+                            break;
+                    }
+                }
+                return true;
+            }
+
+            public Avatar Current => End() ? null : _spatialPartition._avatars[_current];
+            object IEnumerator.Current => Current;
+            public void Dispose() { }
+            public void Reset() { }
+            public bool End() => _spatialPartition == null || _current >= _spatialPartition._avatars.Count;
+            public void Clear() => DecrementIteratorCount();
+
+            private void IncrementIteratorCount()
+            {
+                if (_spatialPartition != null) _spatialPartition.AvatarIteratorCount++;
+            }
+
+            private void DecrementIteratorCount()
+            {
+                if (_spatialPartition != null) _spatialPartition.AvatarIteratorCount--;
+            }
+        }
     }
 
-    // QuadtreeLocation<WorldEntity,EntityRegionSpatialPartitionElementOps<WorldEntity>,24>
     public class EntityRegionSpatialPartitionLocation : QuadtreeLocation<WorldEntity>
     {
         public EntityRegionSpatialPartitionLocation(WorldEntity element) : base(element) { }
         public override Aabb GetBounds() => Element.RegionBounds;
     }
 
-    // Quadtree<WorldEntity,EntityRegionSpatialPartitionElementOps<WorldEntity>,24>
     public class WorldEntityRegionSpatialPartition : Quadtree<WorldEntity>
     {
-        public WorldEntityRegionSpatialPartition(Aabb bound, float minRadius, EntityRegionSPContextFlags flag) : base(bound, minRadius) 
+        public WorldEntityRegionSpatialPartition(in Aabb bound, float minRadius, EntityRegionSPContextFlags flag) : base(bound, minRadius) 
         {
             Flag = flag;
         }

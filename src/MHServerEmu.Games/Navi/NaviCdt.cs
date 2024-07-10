@@ -1,8 +1,8 @@
-﻿using MHServerEmu.Core.Collisions;
+﻿using MHServerEmu.Core.Collections;
+using MHServerEmu.Core.Collisions;
 using MHServerEmu.Core.Helpers;
 using MHServerEmu.Core.Logging;
 using MHServerEmu.Core.VectorMath;
-using MHServerEmu.Games.Common;
 using System.Globalization;
 using System.Text;
 
@@ -36,7 +36,7 @@ namespace MHServerEmu.Games.Navi
             _sectors = Array.Empty<NaviTriangle>();
         }
 
-        public void Create(Aabb bounds)
+        public void Create(in Aabb bounds)
         {
             Release();
             Bounds = bounds;
@@ -225,7 +225,7 @@ namespace MHServerEmu.Games.Navi
             }
         }
 
-        private NaviTriangle FindTriangleContainingVertex(NaviPoint point)
+        public NaviTriangle FindTriangleContainingVertex(NaviPoint point)
         {
             var triangle = FindTriangleAtPoint(point.Pos);
             if (triangle != null)
@@ -503,18 +503,18 @@ namespace MHServerEmu.Games.Navi
         }
 
         public void AddEdge(NaviEdge edge)
-        {
-            Queue<NaviEdge> edges = new ();
-            edges.Enqueue(edge);
+        {          
+            FixedDeque<NaviEdge> edges = new (256);
+            edges.PushBack(edge);
 
-            while (edges.Count > 0)
+            while (!edges.Empty)
             {
-                edge = edges.Dequeue();
+                edge = edges.PopFront();
                 AddEdge(edge, edges);
             }
         }
 
-        private void AddEdge(NaviEdge edge, Queue<NaviEdge> edges)
+        private void AddEdge(NaviEdge edge, FixedDeque<NaviEdge> edges)
         {
             NaviPoint p0 = edge.Points[0];
             NaviPoint p1 = edge.Points[1];
@@ -575,8 +575,8 @@ namespace MHServerEmu.Games.Navi
             if (splitEdge != null)
             {
                 splitPoint = splitEdge.OpposedPoint(p0);
-                edges.Enqueue(new(p0, splitPoint, edge.EdgeFlags, edge.PathingFlags));
-                edges.Enqueue(new(splitPoint, p1, edge.EdgeFlags, edge.PathingFlags));
+                edges.PushBack(new(p0, splitPoint, edge.EdgeFlags, edge.PathingFlags));
+                edges.PushBack(new(splitPoint, p1, edge.EdgeFlags, edge.PathingFlags));
                 return;
             }
 
@@ -641,8 +641,8 @@ namespace MHServerEmu.Games.Navi
 
                 if (Segment.SegmentPointDistanceSq2D(p0.Pos, p1.Pos, splitPoint.Pos) < SplitEpsilonSq)
                 {
-                    edges.Enqueue(new(p0, splitPoint, edge.EdgeFlags, edge.PathingFlags));
-                    edges.Enqueue(new(splitPoint, p1, edge.EdgeFlags, edge.PathingFlags));
+                    edges.PushBack(new(p0, splitPoint, edge.EdgeFlags, edge.PathingFlags));
+                    edges.PushBack(new(splitPoint, p1, edge.EdgeFlags, edge.PathingFlags));
                     return;
                 }
 
@@ -738,7 +738,7 @@ namespace MHServerEmu.Games.Navi
             return edge;
         }
 
-        private void SplitEdge(NaviEdge splitEdge, NaviEdge edge, Queue<NaviEdge> edges)
+        private void SplitEdge(NaviEdge splitEdge, NaviEdge edge, FixedDeque<NaviEdge> edges)
         {
             if (splitEdge.TestFlag(NaviEdgeFlags.Door))
                 _navi.LogError("SplitEdge: Cannot split door edges!", edge);
@@ -756,13 +756,13 @@ namespace MHServerEmu.Games.Navi
             }
             else if (splitEdge.Contains(splitPoint) == false)
             {
-                edges.Enqueue(new(splitEdge.Points[0], splitPoint, splitEdge.EdgeFlags, splitEdge.PathingFlags));
-                edges.Enqueue(new(splitPoint, splitEdge.Points[1], splitEdge.EdgeFlags, splitEdge.PathingFlags));
+                edges.PushBack(new(splitEdge.Points[0], splitPoint, splitEdge.EdgeFlags, splitEdge.PathingFlags));
+                edges.PushBack(new(splitPoint, splitEdge.Points[1], splitEdge.EdgeFlags, splitEdge.PathingFlags));
                 RemoveEdge(splitEdge, false);
             }
 
-            if (p0 != splitPoint) edges.Enqueue(new(p0, splitPoint, edge.EdgeFlags, edge.PathingFlags));
-            if (splitPoint != p1) edges.Enqueue(new(splitPoint, p1, edge.EdgeFlags, edge.PathingFlags));
+            if (p0 != splitPoint) edges.PushBack(new(p0, splitPoint, edge.EdgeFlags, edge.PathingFlags));
+            if (splitPoint != p1) edges.PushBack(new(splitPoint, p1, edge.EdgeFlags, edge.PathingFlags));
         }
 
         public void RemoveEdge(NaviEdge edge, bool check = true)
@@ -840,7 +840,7 @@ namespace MHServerEmu.Games.Navi
             NaviTriangleState triangleState = new (triangle);
 
             List<NaviEar> listEar = new ();
-            FixedPriorityQueue<NaviEar> queueEar = new ();
+            FixedPriorityQueue<NaviEar> queueEar = new (512);
 
             NaviTriangle it = triangle;
             NaviTriangle nextTriangle;
@@ -962,5 +962,72 @@ namespace MHServerEmu.Games.Navi
 
             return sb.ToString();
         }
+
+        public NaviPoint FindCachedPointAtPoint(Vector3 position)
+        {
+            return _vertexLookupCache.FindVertex(position);
+        }
+
+        public bool AttemptCheapVertexPositionUpdate(NaviTriangle triangle, NaviPoint point, Vector3 position)
+        {
+            var oldPos = point.Pos;
+            point.Pos = position;
+            bool checkFail = false;
+            
+            var nextTriangle = triangle;
+            do
+            {
+                nextTriangle.OpposedTriangle(point, out NaviTriangle oppoTriangle, out NaviEdge oppoEdge);
+                if (oppoTriangle != null)
+                {
+                    var checkPoint = oppoTriangle.OpposedVertex(oppoEdge);
+                    var p0 = nextTriangle.PointCW(0);
+                    var p1 = nextTriangle.PointCW(1);
+                    var p2 = nextTriangle.PointCW(2);
+
+                    if (Pred.IsDegenerate(p0, p1, p2) || Pred.CircumcircleContainsPoint(p0, p1, p2, checkPoint))
+                    {
+                        checkFail = true;
+                        break;
+                    }
+                }
+                nextTriangle = nextTriangle.NextTriangleSharingPoint(point);
+            } while (nextTriangle != triangle);            
+
+            if (checkFail)
+            {
+                point.Pos = oldPos;
+                return false;
+            }
+            else
+            {
+                point.Pos = oldPos;                
+                nextTriangle = triangle;
+                do
+                {
+                    var sectorIndex = PointToSectorIndex(nextTriangle.Centroid());
+                    if (sectorIndex != -1 && nextTriangle == _sectors[sectorIndex])
+                        _sectors[sectorIndex] = null;
+                    nextTriangle = nextTriangle.NextTriangleSharingPoint(point);
+                } while (nextTriangle != triangle);
+
+                _vertexLookupCache.UpdateVertex(point, NaviUtil.ProjectToPlane(triangle, position));                
+                nextTriangle = triangle;
+                do
+                {
+                    AddTriangleFastLookupRef(nextTriangle);
+                    nextTriangle = nextTriangle.NextTriangleSharingPoint(point);
+                } while (nextTriangle != triangle);                
+
+                return true;
+            }
+        }
+
+        public NaviPoint FindAttachedPointAtPoint(Vector3 position)
+        {
+            NaviPoint point = _vertexLookupCache.FindVertex(position);
+            return point != null && point.TestFlag(NaviPointFlags.Attached) ? point : null;
+        }
+
     }
 }

@@ -1,5 +1,6 @@
-﻿using MHServerEmu.Core.VectorMath;
-using MHServerEmu.Games.Common;
+﻿using MHServerEmu.Core.Collections;
+using MHServerEmu.Core.Collisions;
+using MHServerEmu.Core.VectorMath;
 
 namespace MHServerEmu.Games.Navi
 {
@@ -51,6 +52,20 @@ namespace MHServerEmu.Games.Navi
             return hash;
         }
 
+        public ulong GetHash64()
+        {
+            ulong hash = 14695981039346656037;
+            hash = (hash ^ Edges[0].GetHash64()) * 1099511628211;
+            hash = (hash ^ Edges[1].GetHash64()) * 1099511628211;
+            hash = (hash ^ Edges[2].GetHash64()) * 1099511628211;
+            // hash = (hash ^ EdgeSideFlags) * 1099511628211;
+            // hash = (hash ^ (byte)Flags) * 1099511628211;
+            // hash = (hash ^ (byte)PathingFlags) * 1099511628211;
+            // hash = (hash ^ ContentFlagCounts.GetHash64()) * 1099511628211;
+
+            return hash;
+        }
+
         public string ToHashString()
         {
             return $"{GetHash():X} E[{Edges[0].GetHashOpposedTriangle(this):X} {Edges[1].GetHashOpposedTriangle(this):X} {Edges[2].GetHashOpposedTriangle(this):X}]";
@@ -59,6 +74,11 @@ namespace MHServerEmu.Games.Navi
         public string ToHashString2()
         {
             return $"{GetHash():X} E[{Edges[0].GetHash():X} {Edges[1].GetHash():X} {Edges[2].GetHash():X}] [{EdgeSideFlags:X} {(byte)Flags:X} {(byte)PathingFlags:X}]";
+        }
+
+        public string ToHashString64()
+        {
+            return $"{GetHash64():X} E[{Edges[0].GetHash64():X} {Edges[1].GetHash64():X} {Edges[2].GetHash64():X}]\n [{PointCW(0).ToStringCoord2D()} {PointCW(1).ToStringCoord2D()} {PointCW(2).ToStringCoord2D()}]";
         }
 
         public void SetFlag(NaviTriangleFlags flag)
@@ -233,6 +253,88 @@ namespace MHServerEmu.Games.Navi
                 return p;
             }
             return null;
+        }
+
+        public float CalcSpawnableArea()
+        {
+            if (PathingFlags.HasFlag(PathFlags.Walk) && PathingFlags.HasFlag(PathFlags.BlackOutZone) == false)
+                return Segment.SignedDoubleTriangleArea2D(PointCW(0).Pos, PointCW(1).Pos, PointCW(2).Pos) / 2.0f;
+            return 0.0f;
+        }
+
+        public void OpposedTriangle(NaviPoint point, out NaviTriangle triangle, out NaviEdge edge)
+        {
+            edge = OpposedEdge(point);
+            triangle = edge.OpposedTriangle(this);
+        }
+
+        public bool Contains(Vector3 point)
+        {
+            return Pred.Contains2D(PointCW(0), PointCW(1), PointCW(2), point);
+        }
+
+        public bool TestPathFlags(PathFlags pathFlags) => (PathingFlags & pathFlags) != 0;
+
+        public float GetRelationOfEdgeToPoint(Vector3 point, int edgeIndex)
+        {
+            var edge = Edges[edgeIndex];
+            float d = Segment.Cross2D(point - edge.Points[0].Pos, edge.Points[1].Pos - edge.Points[0].Pos);
+            if (EdgeSideFlag(edgeIndex) != 0) d = -d;
+            return d;
+        }
+
+        public float CalculateWidth(NaviEdge edge1, NaviEdge edge2)
+        {
+            NaviPoint point = NaviEdge.SharedVertex(edge1, edge2);
+            NaviEdge edge = OpposedEdge(point);
+            NaviPoint point2 = edge2.OpposedPoint(point);
+            NaviPoint point1 = edge1.OpposedPoint(point);
+            if (NaviUtil.IsAngleObtuse2D(point.Pos, point2.Pos, point1.Pos) 
+                || NaviUtil.IsAngleObtuse2D(point.Pos, point1.Pos, point2.Pos))
+            {
+                float width1 = edge1.Length2D() - point.InfluenceRadius - point1.InfluenceRadius;
+                float width2 = edge2.Length2D() - point.InfluenceRadius - point2.InfluenceRadius;
+                return Math.Min(width1, width2);
+            }
+            else if (edge.TestFlag(NaviEdgeFlags.Constraint))
+            {
+                float dist = Segment.SegmentPointDistance2D(edge.Points[0].Pos, edge.Points[1].Pos, point.Pos);
+                return dist - point.InfluenceRadius;
+            }
+            else
+            {
+                float width1 = edge1.Length2D() - point.InfluenceRadius - point1.InfluenceRadius;
+                float width2 = edge2.Length2D() - point.InfluenceRadius - point2.InfluenceRadius;
+                float width = Math.Min(width1, width2);
+                return SearchWidth(point, this, edge, width);
+            }
+        }
+
+        private static float SearchWidth(NaviPoint point, NaviTriangle triangle, NaviEdge edge, float width)
+        {
+            if (NaviUtil.IsAngleObtuse2D(point.Pos, edge.Points[0].Pos, edge.Points[1].Pos) ||
+                NaviUtil.IsAngleObtuse2D(point.Pos, edge.Points[1].Pos, edge.Points[0].Pos))
+                return width;
+
+            float dist = Segment.SegmentPointDistance2D(edge.Points[0].Pos, edge.Points[1].Pos, point.Pos);
+            if (dist > width)
+                return width;
+            else if (edge.TestFlag(NaviEdgeFlags.Constraint))
+                return dist - point.InfluenceRadius;
+            else
+            {
+                NaviTriangle oppoTriangle = edge.OpposedTriangle(triangle);
+                int edgeIndex = oppoTriangle.EdgeIndex(edge);
+                width = SearchWidth(point, oppoTriangle, oppoTriangle.EdgeMod(edgeIndex + 1), width);
+                return SearchWidth(point, oppoTriangle, oppoTriangle.EdgeMod(edgeIndex + 2), width);
+            }
+        }
+
+        public float CalculateWidthIgnoreInitialEdges(NaviEdge edge1, NaviEdge edge2)
+        {
+            NaviPoint point = NaviEdge.SharedVertex(edge1, edge2);
+            NaviEdge edge = OpposedEdge(point);
+            return SearchWidth(point, this, edge, float.MaxValue);
         }
 
     }

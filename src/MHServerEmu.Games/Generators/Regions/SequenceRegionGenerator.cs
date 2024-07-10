@@ -1,4 +1,5 @@
-﻿using MHServerEmu.Core.Collisions;
+﻿using MHServerEmu.Core.Collections;
+using MHServerEmu.Core.Collisions;
 using MHServerEmu.Core.Extensions;
 using MHServerEmu.Core.Logging;
 using MHServerEmu.Core.System.Random;
@@ -718,10 +719,10 @@ namespace MHServerEmu.Games.Generators.Regions
     public class AreaEdge
     {
         private static readonly Logger Logger = LogManager.CreateLogger();
-        public Area Area { get; }
-        public Cell.Type Type { get; }
-        public Segment Edge { get; }
-        public ConnectionList ConnectionList { get; }
+        public Area Area;
+        public Cell.Type Type;
+        public Segment Edge;
+        public ConnectionList ConnectionList;
 
         public AreaEdge(Area area, Cell.Type type, Vector3 a, Vector3 b)
         {
@@ -749,8 +750,8 @@ namespace MHServerEmu.Games.Generators.Regions
 
         }
 
-        public bool IsValid() => Edge.Length() > 0 && ConnectionList.Any();
-        public float GetLength() => Edge.Length();
+        public bool IsValid() => Edge.Length > 0 && ConnectionList.Any();
+        public float GetLength() => Edge.Length;
 
     }
 

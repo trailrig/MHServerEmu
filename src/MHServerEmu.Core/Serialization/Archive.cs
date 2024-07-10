@@ -67,12 +67,15 @@ namespace MHServerEmu.Core.Serialization
         public bool IsPacking { get; }
         public bool IsUnpacking { get => IsPacking == false; }
 
+        public long CurrentOffset { get => _bufferStream.Position; }
+
         /// <summary>
         /// Constructs a new <see cref="Archive"/> instance for packing.
         /// </summary>
-        public Archive(ArchiveSerializeType serializeType, ulong replicationPolicy)
+        public Archive(ArchiveSerializeType serializeType, ulong replicationPolicy = 0)
         {
-            if (serializeType != ArchiveSerializeType.Replication) throw new NotImplementedException($"Unsupported archive serialize type {serializeType}.");
+            if ((serializeType == ArchiveSerializeType.Replication || serializeType == ArchiveSerializeType.Database) == false)
+                throw new NotImplementedException($"Unsupported archive serialize type {serializeType}.");
 
             _bufferStream = new(1024);
             _cos = CodedOutputStream.CreateInstance(_bufferStream);
@@ -90,7 +93,8 @@ namespace MHServerEmu.Core.Serialization
         /// </summary>
         public Archive(ArchiveSerializeType serializeType, byte[] buffer)
         {
-            if (serializeType != ArchiveSerializeType.Replication) throw new NotImplementedException($"Unsupported archive serialize type {serializeType}.");
+            if ((serializeType == ArchiveSerializeType.Replication || serializeType == ArchiveSerializeType.Database) == false)
+                throw new NotImplementedException($"Unsupported archive serialize type {serializeType}.");
 
             _bufferStream = new(buffer);
             _cis = CodedInputStream.CreateInstance(_bufferStream);
@@ -103,12 +107,29 @@ namespace MHServerEmu.Core.Serialization
         }
 
         /// <summary>
+        /// Constructs a new <see cref="Archive"/> instance for unpacking.
+        /// </summary>
+        public Archive(ArchiveSerializeType serializeType, ByteString buffer) : this(serializeType, ByteString.Unsafe.GetBuffer(buffer))
+        {
+            // We use ByteString.Unsafe here to avoid copying data one extra time (ByteString -> Stream instead of ByteString -> Buffer -> Stream).
+        }
+
+        /// <summary>
         /// Returns the <see cref="MemoryStream"/> instance that acts as the AutoBuffer for this <see cref="Archive"/>.
         /// </summary>
         /// <remarks>
         /// AutoBuffer is the name of the data structure that backs archives in the client.
         /// </remarks>
         public MemoryStream AccessAutoBuffer() => _bufferStream;
+
+        /// <summary>
+        /// Converts the underlying <see cref="MemoryStream"/> to <see cref="ByteString"/>.
+        /// </summary>
+        public ByteString ToByteString()
+        {
+            // We use ByteString.Unsafe here to avoid copying data one extra time (Stream -> ByteString instead of Stream -> Buffer -> ByteString).
+            return ByteString.Unsafe.FromBytes(_bufferStream.ToArray());
+        }
 
         /// <summary>
         /// Writes the header for this <see cref="Archive"/>. Returns <see langword="true"/> if successful.
@@ -186,6 +207,17 @@ namespace MHServerEmu.Core.Serialization
             }
 
             return true;
+        }
+
+        /// <summary>
+        /// Transfers a <see cref="byte"/> value to or from this <see cref="Archive"/> instance. Returns <see langword="true"/> if successful.
+        /// </summary>
+        public bool Transfer(ref byte ioData)
+        {
+            if (IsPacking)
+                return WriteSingleByte(ioData);
+            else
+                return ReadSingleByte(ref ioData);
         }
 
         /// <summary>
@@ -289,7 +321,7 @@ namespace MHServerEmu.Core.Serialization
         /// <summary>
         /// Transfers an <see cref="ISerialize"/> instance to or from this <see cref="Archive"/> instance. Returns <see langword="true"/> if successful.
         /// </summary>
-        public bool Transfer(ref ISerialize ioData)
+        public bool Transfer<T>(ref T ioData) where T: ISerialize
         {
             return ioData.Serialize(this);
         }
@@ -537,11 +569,6 @@ namespace MHServerEmu.Core.Serialization
             }
         }
 
-        // NOTE: PropertyCollection::serializeWithDefault() does a weird thing where it manipulates the archive buffer directly.
-        // First it allocates 4 bytes for the number of properties, than it writes all the properties, and then it goes back
-        // and updates the number. This is most likely a side effect of not all properties being saved to the database in the
-        // original implementation.
-
         // These methods are also used for FavorSpeed (disk mode).
 
         /// <summary>
@@ -552,6 +579,17 @@ namespace MHServerEmu.Core.Serialization
             _cos.WriteRawBytes(BitConverter.GetBytes(value));
             _cos.Flush();
             return true;
+        }
+
+        /// <summary>
+        /// Writes the provided <see cref="uint"/> value at the specified position in the underlying stream. Returns <see langword="true"/> if successful.
+        /// </summary>
+        public bool WriteUnencodedStream(uint value, long position)
+        {
+            // NOTE: PropertyCollection::serializeWithDefault() does a weird thing where it manipulates the archive buffer directly.
+            // First it allocates 4 bytes for the number of properties, than it writes all the properties, and then it goes back
+            // and updates the number.
+            return _bufferStream.WriteUInt32At(position, value);
         }
 
         /// <summary>

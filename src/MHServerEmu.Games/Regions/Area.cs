@@ -12,6 +12,7 @@ using MHServerEmu.Games.Generators;
 using MHServerEmu.Games.Generators.Areas;
 using MHServerEmu.Games.Generators.Population;
 using MHServerEmu.Games.Generators.Regions;
+using MHServerEmu.Games.Properties;
 
 namespace MHServerEmu.Games.Regions
 {
@@ -88,6 +89,7 @@ namespace MHServerEmu.Games.Regions
             Origin = new();
             LocalBounds = Aabb.InvertedLimit;
             RegionBounds = Aabb.InvertedLimit;
+            AreaLevel = -1;
         }
 
         public bool Initialize(AreaSettings settings)
@@ -131,6 +133,24 @@ namespace MHServerEmu.Games.Regions
             }
 
             MinimapRevealGroupId = AreaPrototype.MinimapRevealGroupId;
+
+            var emptyPopulation = GameDatabase.PopulationGlobalsPrototype.EmptyPopulation;
+            var populationOverrides = Region.RegionPrototype.PopulationOverrides;
+
+            if (populationOverrides.HasValue() && AreaPrototype.Population != emptyPopulation)
+            {
+                GRandom random = new(RandomSeed);
+                var regionPopulation = populationOverrides[random.Next(0, populationOverrides.Length)];
+                if (regionPopulation != GameData.PrototypeId.Invalid)
+                    PopulationRef = regionPopulation;
+                else
+                    PopulationRef = AreaPrototype.Population;
+            } 
+            else if (AreaPrototype.Population != GameData.PrototypeId.Invalid)
+                PopulationRef = AreaPrototype.Population;
+
+            if (PopulationRef != GameData.PrototypeId.Invalid)
+                PopulationArea = new (this, PopulationRef);
 
             return true;
         }
@@ -223,24 +243,51 @@ namespace MHServerEmu.Games.Regions
 
         private bool PostGenerate()
         {
+            if (IsDynamicArea()) return true;
             // if (AreaPrototype.FullyGenerateCells) // only TheRaft
             foreach (var cell in CellIterator())
                 cell.PostGenerate(); // can be here?
-            
+
+            // Spawn Entity from Missions, MetaStates
+            var population = Region.PopulationManager.PopulationMarkers;
+            foreach (var cell in CellIterator())
+                cell.SpawnPopulation(population);
+            // Spawn Themes
+            PopulationArea.SpawnPopulation(Region.PopulationManager.PopulationObjects);
+
             return true;
         }
 
         private bool GeneratePopulation()
         {
+            if (TestStatus(GenerateFlag.Background) == false)
+            {
+                Logger.Warn($"Generate population should have background generator \nRegion:{Region}\nArea:{ToString()}");
+                return false;
+            }
+
+            if (TestStatus(GenerateFlag.Population)) return true;
+            SetStatus(GenerateFlag.Population, true);
+
+            BlackOutZonesRebuild();
+
             if (Region.Settings.GenerateEntities)
                 foreach (var cell in CellIterator()) {
-                    MarkerSetOptions options = MarkerSetOptions.Default;
+                    MarkerSetOptions options = MarkerSetOptions.Default | MarkerSetOptions.SpawnMissionAssociated;
                     var cellProto = cell.CellProto;
                     if (cellProto.IsOffsetInMapFile == false) options |= MarkerSetOptions.NoOffset;
                     cell.InstanceMarkerSet(cellProto.MarkerSet, Transform3.Identity(), options);
                 }
 
+            PopulationArea?.Generate();
+
             return true;
+        }
+
+        private void BlackOutZonesRebuild()
+        {
+            foreach (var cell in CellIterator())
+                cell.BlackOutZonesRebuild();
         }
 
         private bool GenerateNavi()
@@ -344,7 +391,7 @@ namespace MHServerEmu.Games.Regions
             GRandom random = new(RandomSeed);
 
             bool success = Generator.Generate(random, regionGenerator, areas);
-            if (!success) Logger.Error($"Area {ToString()} in region {Region} failed to generate");
+            if (success == false) Logger.Warn($"Area {ToString()} in region {Region} failed to generate");
 
             Generator = null;
 
@@ -411,7 +458,7 @@ namespace MHServerEmu.Games.Regions
 
             AreaConnections.Add(areaConnection);
         }
-        public bool GetPossibleAreaConnections(ConnectionList connections, Segment segment)
+        public bool GetPossibleAreaConnections(ConnectionList connections, in Segment segment)
         {
             if (Generator == null) return false;
             return Generator.GetPossibleConnections(connections, segment);
@@ -425,6 +472,10 @@ namespace MHServerEmu.Games.Regions
         }
 
         public string PrototypeName => GameDatabase.GetFormattedPrototypeName(PrototypeDataRef);
+
+        public PrototypeId PopulationRef { get; private set; }
+        public PopulationArea PopulationArea { get; private set; }
+        public int AreaLevel { get; private set; }
 
         public void Shutdown()
         {
@@ -495,14 +546,14 @@ namespace MHServerEmu.Games.Regions
                 .Build();
         }
 
-        public bool FindTargetPosition(Vector3 markerPos, Orientation markerRot, RegionConnectionTargetPrototype target)
+        public bool FindTargetPosition(ref Vector3 markerPos, ref Orientation markerRot, RegionConnectionTargetPrototype target)
         {
             var cellRef = GameDatabase.GetDataRefByAsset(target.Cell);
 
             foreach (Cell cell in CellIterator())
             {
                 if (cellRef != 0 && cellRef != cell.PrototypeId) continue; // TODO check
-                if (cell.FindTargetPosition(markerPos, markerRot, target)) return true;
+                if (cell.FindTargetPosition(ref markerPos, ref markerRot, target)) return true;
             }
 
             return false;
@@ -513,6 +564,33 @@ namespace MHServerEmu.Games.Regions
             return GameDatabase.GlobalsPrototype.DynamicArea == PrototypeDataRef;
         }
 
+        public int GetCharacterLevel(WorldEntityPrototype entityProto)
+        {
+            int characterLevel = entityProto.Properties[PropertyEnum.CharacterLevel];
+            int areaLevel = Region.GetAreaLevel(this);
+            if (characterLevel > 0 && areaLevel > 0)
+            {
+                if (Region.RegionPrototype.LevelOverridesCharacterLevel) 
+                    characterLevel = areaLevel;
+            }
+            else
+                characterLevel = Math.Max(characterLevel, areaLevel);
+            return characterLevel;
+        }
+
+        public int GetAreaLevel()
+        {
+            if (AreaLevel > 0) return AreaLevel;
+            if (AreaPrototype == null) return 1;
+            if (AreaPrototype.LevelOffset != 0) AreaLevel = Region.RegionLevel + AreaPrototype.LevelOffset;
+            else AreaLevel = Region.RegionLevel;
+            return AreaLevel;
+        }
+
+        public bool HasKeyword(KeywordPrototype keywordProto)
+        {
+            return keywordProto != null && AreaPrototype.HasKeyword(keywordProto);
+        }
     }
 
     public class AreaConnectionPoint

@@ -4,15 +4,15 @@ using MHServerEmu.Core.Collisions;
 using MHServerEmu.Core.Extensions;
 using MHServerEmu.Core.System.Random;
 using MHServerEmu.Core.VectorMath;
+using MHServerEmu.Games.Common.SpatialPartitions;
 using MHServerEmu.Games.Entities;
 using MHServerEmu.Games.GameData;
 using MHServerEmu.Games.GameData.Calligraphy.Attributes;
 using MHServerEmu.Games.GameData.Prototypes;
 using MHServerEmu.Games.GameData.Prototypes.Markers;
-using MHServerEmu.Games.Generators;
 using MHServerEmu.Games.Generators.Population;
-using MHServerEmu.Games.Generators.Regions;
 using MHServerEmu.Games.Navi;
+using MHServerEmu.Games.Properties;
 
 namespace MHServerEmu.Games.Regions
 {
@@ -40,9 +40,10 @@ namespace MHServerEmu.Games.Regions
         public int Seed { get; private set; }
         public PrototypeId PopulationThemeOverrideRef { get; private set; }
         public Aabb RegionBounds { get; private set; }
+        public Region Region { get => Area?.Region; }
         public Area Area { get; private set; }
         public Game Game { get => Area?.Game; }
-        public IEnumerable<Entity> Entities { get => Game.EntityManager.GetEntities(this); } // TODO: Optimize
+        public IEnumerable<Entity> Entities { get => Game.EntityManager.IterateEntities(this); } // TODO: Optimize
 
         public List<uint> CellConnections = new();
         public List<ReservedSpawn> Encounters { get; } = new();
@@ -51,6 +52,8 @@ namespace MHServerEmu.Games.Regions
         private float SpawnableNavArea;
         public float PlayableArea { get => (PlayableNavArea != -1.0) ? PlayableNavArea : 0.0f; }
         public float SpawnableArea { get => (SpawnableNavArea != -1.0) ? SpawnableNavArea : 0.0f; }
+        public PopulationArea PopulationArea { get => Area.PopulationArea ; }
+        public PopulationManager PopulationManager { get => Region.PopulationManager; }
         public CellRegionSpatialPartitionLocation SpatialPartitionLocation { get; }
         public Vector3 AreaOffset { get; private set; }
         public Vector3 AreaPosition { get; private set; }
@@ -104,7 +107,7 @@ namespace MHServerEmu.Games.Regions
             if (CellProto == null) return;
 
             if (SpatialPartitionLocation.IsValid())
-                GetRegion().PartitionCell(this, Region.PartitionContext.Remove);
+                Region.PartitionCell(this, Region.PartitionContext.Remove);
 
             AreaPosition = positionInArea;
             AreaOrientation = orientationInArea;
@@ -118,12 +121,12 @@ namespace MHServerEmu.Games.Regions
             RegionBounds.RoundToNearestInteger();
 
             if (!SpatialPartitionLocation.IsValid())
-                GetRegion().PartitionCell(this, Region.PartitionContext.Insert);
+                Region.PartitionCell(this, Region.PartitionContext.Insert);
         }
 
         public void AddNavigationDataToRegion()
         {
-             Region region = GetRegion();
+             Region region = Region;
              if (region == null) return;
              NaviMesh naviMesh = region.NaviMesh;
              if (CellProto == null) return;
@@ -182,44 +185,14 @@ namespace MHServerEmu.Games.Regions
 
         public bool PostInitialize()
         {
-            var region = GetRegion();
-            var entityManager = Game.EntityManager;
-            PrototypeId areaRef = Area.PrototypeDataRef;
-            ConnectionNodeList targets = region.Targets;
-
-            foreach (var marker in CellProto.InitializeSet.Markers)
-            {
-                if (marker is EntityMarkerPrototype entityMarker)
-                {
-                    PrototypeId protoId = GameDatabase.GetDataRefByPrototypeGuid(entityMarker.EntityGuid);
-                    Prototype entity = GameDatabase.GetPrototype<Prototype>(protoId);
-                    
-                    // Spawn Teleports
-                    if (entity is TransitionPrototype transition)
-                    {
-                        bool snap = entityMarker.OverrideSnapToFloor;
-                        Vector3 position = CalcMarkerPosition(entityMarker.Position);
-                        position.Z += transition.Bounds.GetBoundHalfHeight();
-                        PrototypeId targetRef = PrototypeId.Invalid;
-                        if (transition.Waypoint != 0)
-                        {
-                            var waypointProto = GameDatabase.GetPrototype<WaypointPrototype>(transition.Waypoint);
-                            targetRef = waypointProto.Destination;
-                        }
-                        else
-                        {
-                            TargetObject node = RegionTransition.GetTargetNode(targets, areaRef, this.PrototypeId, entityMarker.EntityGuid);
-                            if (node != null) targetRef = node.TargetId;
-                        }
-                        entityManager.SpawnTargetTeleport(this, transition, position, entityMarker.Rotation, false, targetRef, snap);
-                    }
-                }
-            }
+            MarkerSetOptions options = MarkerSetOptions.Default;
+            if (CellProto.IsOffsetInMapFile == false) options |= MarkerSetOptions.NoOffset;
+            InstanceMarkerSet(CellProto.InitializeSet, Transform3.Identity(), options);
 
             return true;
         }
 
-        public void InstanceMarkerSet(MarkerSetPrototype markerSet, Transform3 transform, MarkerSetOptions instanceMarkerSetOptions)
+        public void InstanceMarkerSet(MarkerSetPrototype markerSet, in Transform3 transform, MarkerSetOptions instanceMarkerSetOptions)
         {
             if (instanceMarkerSetOptions.HasFlag(MarkerSetOptions.SpawnMissionAssociated | MarkerSetOptions.NoSpawnMissionAssociated)) return;
             if (markerSet.Markers.HasValue())
@@ -228,46 +201,75 @@ namespace MHServerEmu.Games.Regions
                         SpawnMarker(marker, transform, instanceMarkerSetOptions);
         }
 
-        public void SpawnMarker(MarkerPrototype marker, Transform3 transform, MarkerSetOptions options)
+        public void SpawnMarker(MarkerPrototype marker, in Transform3 transform, MarkerSetOptions options)
         {
             if (marker is EntityMarkerPrototype entityMarker)
             {
                 PrototypeId dataRef = GameDatabase.GetDataRefByPrototypeGuid(entityMarker.EntityGuid);
                 if (entityMarker.LastKnownEntityName.Contains("GambitMTXStore")) return; // Invisible Domino NPC
                 Prototype entity = GameDatabase.GetPrototype<Prototype>(dataRef);
-
-                // Spawn Entity from Cell
-                if (entity is WorldEntityPrototype)
-                    SpawnEntityMarker(entityMarker, transform, options);
+                                
+                if (entity is BlackOutZonePrototype blackOutZone)   // Spawn Blackout zone
+                    SpawnBlackOutZone(entityMarker, blackOutZone, transform, options);
+                else if (entity is WorldEntityPrototype worldEntity) // Spawn Entity from Cell
+                    SpawnEntityMarker(entityMarker, worldEntity, transform, options);
             }
         }
 
-        public void SpawnEntityMarker(EntityMarkerPrototype entityMarker, Transform3 transform, MarkerSetOptions options)
+        private void SpawnBlackOutZone(EntityMarkerPrototype entityMarker, BlackOutZonePrototype blackOutZone, in Transform3 transform, MarkerSetOptions options)
+        {
+            CalcMarkerTransform(entityMarker, transform, options, out Vector3 position, out _);
+            PopulationManager.SpawnBlackOutZone(position, blackOutZone.BlackOutRadius, PrototypeId.Invalid);
+        }
+
+        public void SpawnEntityMarker(EntityMarkerPrototype entityMarker, WorldEntityPrototype entityProto, in Transform3 transform, MarkerSetOptions options)
         {
             CalcMarkerTransform(entityMarker, transform, options, out Vector3 entityPosition, out Orientation entityOrientation);
+            if (RegionBounds.Intersects(entityPosition) == false) entityPosition.RoundToNearestInteger();
 
-            var protoRef = GameDatabase.GetDataRefByPrototypeGuid(entityMarker.EntityGuid);
-            var entity = GameDatabase.GetPrototype<WorldEntityPrototype>(protoRef);
-
-            bool? snapToFloor = SpawnSpec.SnapToFloorConvert(entityMarker.OverrideSnapToFloor, entityMarker.OverrideSnapToFloorValue);
-            snapToFloor ??= entity.SnapToFloorOnSpawn;
-            bool overrideSnap = snapToFloor != entity.SnapToFloorOnSpawn;
-            if (snapToFloor == true) // Fix Boxes in Axis Raid
+            var region = Region;
+            var destructibleKeyword = GameDatabase.KeywordGlobalsPrototype.DestructibleKeyword.As<KeywordPrototype>();            
+            if (region.RegionPrototype.RespawnDestructibles && entityProto.HasKeyword(destructibleKeyword))
             {
-                float projectHeight = RegionBounds.Center.Z + RegionLocation.ProjectToFloor(CellProto, entityPosition);
-                if (entityPosition.Z > projectHeight)
-                    entityPosition.Z = projectHeight;
-            }
-            if (entity.Bounds != null)
-                entityPosition.Z += entity.Bounds.GetBoundHalfHeight();
+                SpawnGroup group = PopulationManager.CreateSpawnGroup();
+                group.Transform = Transform3.BuildTransform(entityPosition, entityOrientation);
 
-            int health = EntityManager.GetRankHealth(entity);
-            WorldEntity worldEntity = Game.EntityManager.CreateWorldEntity(this, protoRef, null, entityPosition, entityOrientation, health, false, overrideSnap);
-            if (worldEntity.WorldEntityPrototype is AgentPrototype)
-                worldEntity.AppendOnStartActions(GetRegion().PrototypeDataRef);
+                SpawnSpec spec = PopulationManager.CreateSpawnSpec(group);
+                spec.EntityRef = entityProto.DataRef;
+                spec.Transform = Transform3.Identity();
+                spec.SnapToFloor = SpawnSpec.SnapToFloorConvert(entityMarker.OverrideSnapToFloor, entityMarker.OverrideSnapToFloorValue);
+                spec.Spawn();
+                return;
+            }
+
+            EntitySettings settings = new();
+            settings.EntityRef = entityProto.DataRef;
+
+            if (entityMarker.OverrideSnapToFloor)
+                settings.OptionFlags |= EntitySettingsOptionFlags.HasOverrideSnapToFloor;
+            if (entityMarker.OverrideSnapToFloorValue)
+                settings.OptionFlags |= EntitySettingsOptionFlags.OverrideSnapToFloorValue;
+            if (PrototypeId == (PrototypeId)13763955919309774578 && entityProto.DataRef == (PrototypeId)3814814281271024430)
+                settings.OptionFlags |= EntitySettingsOptionFlags.HasOverrideSnapToFloor;   // Fix Mandarin
+
+            if (entityProto.Bounds != null)
+                entityPosition.Z += entityProto.Bounds.GetBoundHalfHeight();
+
+            settings.Properties = new PropertyCollection();
+            int level = Area.GetCharacterLevel(entityProto); 
+            settings.Properties[PropertyEnum.CharacterLevel] = level;
+            settings.Properties[PropertyEnum.CombatLevel] = level;
+
+            settings.Position = entityPosition;
+            settings.Orientation = entityOrientation;
+            settings.RegionId = region.Id;
+            settings.Cell = this;
+            settings.ActionsTarget = region.PrototypeDataRef;
+
+            Game.EntityManager.CreateEntity(settings);
         }
 
-        public void CalcMarkerTransform(EntityMarkerPrototype entityMarker, Transform3 transform, MarkerSetOptions options,
+        public void CalcMarkerTransform(EntityMarkerPrototype entityMarker, in Transform3 transform, MarkerSetOptions options,
             out Vector3 markerPosition, out Orientation markerOrientation)
         {
             Transform3 markerTransform = transform * Transform3.BuildTransform(entityMarker.Position, entityMarker.Rotation);
@@ -277,8 +279,8 @@ namespace MHServerEmu.Games.Regions
             else
                 markerTransform = Transform3.BuildTransform(AreaOffset, Orientation.Zero) * markerTransform;
 
-            markerPosition = new (markerTransform.Translation);
-            markerOrientation = new (Orientation.FromTransform3(markerTransform));
+            markerPosition = markerTransform.Translation;
+            markerOrientation = Orientation.FromTransform3(markerTransform);
         }
 
         public static Type BuildTypeFromWalls(Walls walls)
@@ -317,15 +319,9 @@ namespace MHServerEmu.Games.Regions
 
         public void Shutdown()
         {
-            Region region = GetRegion();
+            Region region = Region;
             if (region != null && SpatialPartitionLocation.IsValid())
                 region.PartitionCell(this, Region.PartitionContext.Remove);
-        }
-
-        public Region GetRegion()
-        {
-            if (Area == null) return null;
-            return Area.Region;
         }
 
         public bool IntersectsXY(Vector3 position)
@@ -342,22 +338,20 @@ namespace MHServerEmu.Games.Regions
         {
             // SpawnMarker Prop type
             VisitPropSpawns(new InstanceMarkerSetPropSpawnVisitor(this)); 
+        }
 
-            // SpawnMarkers not Prop type
-            var population = GetRegion().PopulationManager.PopulationMarkers;
+        public void SpawnPopulation(List<PopulationObject> population)
+        {
             foreach (var markerProto in CellProto.MarkerSet.Markers)
-            {
                 if (markerProto is EntityMarkerPrototype entityMarker)
                 {
                     PrototypeId dataRef = GameDatabase.GetDataRefByPrototypeGuid(entityMarker.EntityGuid);
                     Prototype entity = GameDatabase.GetPrototype<Prototype>(dataRef);
 
-                    // Spawn Entity from Missions
                     if (entity is SpawnMarkerPrototype spawnMarker && spawnMarker.Type != MarkerType.Prop)
                         foreach (var spawn in population)
-                            if (spawn.MarkerRef == spawnMarker.DataRef) spawn.Spawn(this);
+                            if (spawn.MarkerRef == spawnMarker.DataRef && spawn.SpawnByMarker(this)) break;
                 }
-            }
         }
 
         private void VisitPropSpawns(PropSpawnVisitor visitor)
@@ -429,7 +423,7 @@ namespace MHServerEmu.Games.Regions
             return builder.Build();
         }
 
-        public bool FindTargetPosition(Vector3 markerPos, Orientation markerRot, RegionConnectionTargetPrototype target)
+        public bool FindTargetPosition(ref Vector3 markerPos, ref Orientation markerRot, RegionConnectionTargetPrototype target)
         {
             if (CellProto != null && CellProto.InitializeSet.Markers.HasValue())
             {
@@ -440,8 +434,8 @@ namespace MHServerEmu.Games.Regions
                         PrototypeId dataRef = GameDatabase.GetDataRefByPrototypeGuid(entityMarker.EntityGuid);
                         if (dataRef == target.Entity)
                         {
-                            markerPos.Set(CalcMarkerPosition(marker.Position));
-                            markerRot.Set(entityMarker.Rotation);
+                            markerPos = CalcMarkerPosition(marker.Position);
+                            markerRot = entityMarker.Rotation;
                             return true;
                         }
                     }
@@ -449,6 +443,23 @@ namespace MHServerEmu.Games.Regions
             }
 
             return false;
+        }
+
+        public void BlackOutZonesRebuild()
+        {
+            if (PlayableArea == 0.0f) return;
+            var region = Region;
+            var naviMesh = region.NaviMesh;
+            var zones = region.PopulationManager.IterateBlackOutZoneInVolume(RegionBounds);
+            foreach (var zone in zones)
+                naviMesh.SetBlackOutZone(zone.Sphere.Center, zone.Sphere.Radius);
+            SpawnableNavArea = naviMesh.CalcSpawnableArea(RegionBounds);
+            PopulationArea.UpdateSpawnCell(this);
+        }
+
+        public void EnemySpawn()
+        {
+            PopulationArea.AddEnemyWeight(this);
         }
 
         #region Enums
@@ -561,5 +572,19 @@ namespace MHServerEmu.Games.Regions
         }
 
         #endregion
+    }
+
+    public class CellRegionSpatialPartitionLocation : QuadtreeLocation<Cell>
+    {
+        public CellRegionSpatialPartitionLocation(Cell element) : base(element) { }
+        public override Aabb GetBounds() => Element.RegionBounds;
+    }
+
+    public class CellSpatialPartition : Quadtree<Cell>
+    {
+        public CellSpatialPartition(in Aabb bound) : base(bound, 128.0f) { }
+
+        public override QuadtreeLocation<Cell> GetLocation(Cell element) => element.SpatialPartitionLocation;
+        public override Aabb GetElementBounds(Cell element) => element.RegionBounds;
     }
 }

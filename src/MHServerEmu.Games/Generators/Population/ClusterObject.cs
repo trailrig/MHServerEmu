@@ -1,4 +1,5 @@
-﻿using MHServerEmu.Core.Collisions;
+﻿using MHServerEmu.Core.Collections;
+using MHServerEmu.Core.Collisions;
 using MHServerEmu.Core.Extensions;
 using MHServerEmu.Core.Helpers;
 using MHServerEmu.Core.Logging;
@@ -8,9 +9,9 @@ using MHServerEmu.Games.Entities;
 using MHServerEmu.Games.Entities.Locomotion;
 using MHServerEmu.Games.GameData;
 using MHServerEmu.Games.GameData.Prototypes;
+using MHServerEmu.Games.Navi;
 using MHServerEmu.Games.Properties;
 using MHServerEmu.Games.Regions;
-using MHServerEmu.Games.Navi;
 
 namespace MHServerEmu.Games.Generators.Population
 {
@@ -106,7 +107,7 @@ namespace MHServerEmu.Games.Generators.Population
         public virtual void SetLocationDirty() { }
         public virtual bool IsFormationObject() => false;
         public virtual bool Initialize() => false;
-        public virtual void Spawn() { }
+        public virtual ulong Spawn(SpawnGroup group, WorldEntity spawner, List<WorldEntity> entities) { return 0; }
         public virtual void UpgradeToRank(RankPrototype upgradeRank, int num) { }
         public virtual void AssignAffixes(RankPrototype rankProto, List<PrototypeId> affixes){ }
         public virtual bool TestLayout() => false;
@@ -117,7 +118,7 @@ namespace MHServerEmu.Games.Generators.Population
         public PopulationObjectPrototype ObjectProto { get; private set; }
         public PropertyCollection Properties { get; private set; }
         public float SubObjectRadiusMax { get; private set; }
-        public SpawnFlags SpawnFlags { get; private set; }
+        public SpawnFlags SpawnFlags { get; set; }
         public List<ClusterObject> Objects { get; private set; }
         public PrototypeId MissionRef { get; private set; }
         public KeyValuePair<PrototypeId, Vector3> BlackOutZone { get; internal set; }
@@ -691,9 +692,39 @@ namespace MHServerEmu.Games.Generators.Population
             Parent?.UpdateBounds(this);
         }
 
-        public override void Spawn()
+        public override ulong Spawn(SpawnGroup group, WorldEntity spawner, List<WorldEntity> entities)
         {
-            foreach (var obj in Objects) obj.Spawn();            
+            var manager = Region.PopulationManager;
+
+            if (Parent == null && group == null)
+            {
+                group = manager.CreateSpawnGroup();
+                group.Transform = Transform3.BuildTransform(GetAbsolutePosition(), Orientation.Zero);
+                if (ObjectProto is PopulationEncounterPrototype populationEncounter)
+                    group.EncounterRef = populationEncounter.GetEncounterRef();
+                group.ObjectProto = ObjectProto;
+                group.MissionRef = MissionRef;
+                group.SpawnerId = spawner != null ? spawner.Id : 0;
+            }
+            if (group == null) return 0;
+
+            foreach (var obj in Objects) obj.Spawn(group, spawner, entities);
+
+            var position = GetAbsolutePosition();
+            if (ObjectProto.Riders.HasValue())
+                foreach (var rider in ObjectProto.Riders)
+                    if (rider is PopulationRiderBlackOutPrototype blackOutProto)
+                    {
+                        var blackout = GameDatabase.GetPrototype<BlackOutZonePrototype>(blackOutProto.BlackOutZone);
+                        manager.SpawnBlackOutZone(position, blackout.BlackOutRadius, MissionRef);
+                    }
+
+            if (BlackOutZone.Key != PrototypeId.Invalid)
+            {
+                var blackout = GameDatabase.GetPrototype<BlackOutZonePrototype>(BlackOutZone.Key);
+                manager.SpawnBlackOutZone(position, blackout.BlackOutRadius, MissionRef);
+            }
+            return group.Id;
         }
 
         public bool PickPositionInSector(Vector3 position, Orientation orientation, int minDistance, int maxDistance)
@@ -745,13 +776,48 @@ namespace MHServerEmu.Games.Generators.Population
                     if (Region.GetCellAtPosition(testPosition) == null) continue;
                     SetParentRelativePosition(testPosition);
                     if (DebugLog) Logger.Debug($"testPostions = {testPosition}");
-                    // TODO Face Orientation
-                    SetParentRelativeOrientation(orientation);
+                    SetParentRandomOrientation(orientation);
                    // Logger.Debug($"AbsolutePostions = {GetAbsolutePosition().ToStringFloat()}");
                     if (TestLayout()) return true;
                 }
             }
             return false;
+        }
+
+        public bool PickPositionInBounds(in Aabb bound)
+        {
+            if (Radius == 0 || bound.Width < Radius || bound.Length < Radius) return false;
+
+            var min = bound.Min;
+            var max = bound.Max;
+            var center = bound.Center;
+            float clusterSize = Radius;
+            List<Point2> points = new();
+
+            for (float x = min.X; x < max.X; x += clusterSize)
+                for (float y = min.Y; y < max.Y; y += clusterSize)
+                    points.Add(new(x, y));
+
+            Random.ShuffleList(points);
+            int tries = Math.Min(points.Count, 256);
+
+            for (int i = 0; i < tries; i++)
+            {
+                var point = points[i];
+                Vector3 testPosition = new(point.X, point.Y, center.Z);  
+                SetParentRelativePosition(testPosition);                
+                Orientation orientation = new(-MathHelper.PiOver2, 0.0f, 0.0f);
+                SetParentRandomOrientation(orientation);
+                if (TestLayout()) return true;
+            }
+
+            return false;
+        }
+
+        private void SetParentRandomOrientation(Orientation orientation)
+        {
+            orientation.Yaw += Random.NextFloat(-MathHelper.PiOver4, MathHelper.PiOver4);
+            SetParentRelativeOrientation(orientation);
         }
 
         public override bool TestLayout()
@@ -760,6 +826,7 @@ namespace MHServerEmu.Games.Generators.Population
                 if (obj?.TestLayout() == false) return false;
             return true;
         }
+
     }
 
     public class ClusterEntity : ClusterObject
@@ -841,13 +908,17 @@ namespace MHServerEmu.Games.Generators.Population
 
         public override bool TestLayout()
         {
-
             Vector3 regionPos = ProjectToFloor(Region);
          
             if (Vector3.IsFinite(regionPos) == false) 
                 return false;
 
-            if (PathFlags != PathFlags.None && Region.NaviMesh.Contains(regionPos, Radius, new DefaultContainsPathFlagsCheck(PathFlags)) == false) 
+            if (PathFlags != PathFlags.None 
+                && Region.NaviMesh.Contains(regionPos, Radius, new DefaultContainsPathFlagsCheck(PathFlags)) == false)
+                return false;
+
+            if (SpawnFlags.HasFlag(SpawnFlags.IgnoreBlackout) == false 
+                && Region.PopulationManager.InBlackOutZone(regionPos, Radius, Parent.MissionRef))
                 return false;
 
             Bounds bounds = new(Bounds)
@@ -885,43 +956,41 @@ namespace MHServerEmu.Games.Generators.Population
         }
 
 
-        public override void Spawn()
+        public override ulong Spawn(SpawnGroup group, WorldEntity spawner, List<WorldEntity> entities)
         {
-            EntityManager entityManager = Region.Game.EntityManager;
-            // TODO check Navi, collission 
+            var manager = Region.PopulationManager;
+            if (group == null) return 0;
             // PropertyCollection, events
-            var tr = GetAbsoluteTransform();
-            var pos = tr.Translation;
-            Cell cell = Region.GetCellAtPosition(pos);
-            var entity = GameDatabase.GetPrototype<WorldEntityPrototype>(EntityRef);
 
-            float oldZ = pos.Z;
-            SnapToFloor ??= entity.SnapToFloorOnSpawn;
-            bool overrideSnap = SnapToFloor != entity.SnapToFloorOnSpawn;
-            if (SnapToFloor == false) 
-            {
-                float projectHeight = cell.RegionBounds.Center.Z + RegionLocation.ProjectToFloor(cell.CellProto, pos);
-                if (pos.Z > projectHeight && Segment.EpsilonTest(pos.Z, projectHeight, 500)) // Fix for Door Lower Asgard
-                    pos.Z = projectHeight;
-                overrideSnap = false; // Fix for District
-            }
-            if (entity.Bounds != null) 
-                pos.Z += entity.Bounds.GetBoundHalfHeight();
-            var rot = tr.Orientation;
-            int health = EntityManager.GetRankHealth(entity);
+            var pos = GetAbsolutePosition();
+            var groupPosition = group.Transform.Translation;
 
-            var worldEntity = entityManager.CreateWorldEntity(cell, EntityRef, Parent.Properties, pos, rot, health, false, overrideSnap);      
-            if (worldEntity == null) return;
-            if (worldEntity.WorldEntityPrototype is AgentPrototype)
-            {
-                bool startAction = false;
-                if (EntitySelectorProto != null && EntitySelectorProto.EntitySelectorActions.HasValue())
-                    startAction = worldEntity.AppendSelectorActions(EntitySelectorProto.EntitySelectorActions);
-                if (Parent.MissionRef != PrototypeId.Invalid && startAction == false) 
-                    worldEntity.AppendOnStartActions(Parent.MissionRef);
-            }
+            if (Region.Bound.IntersectsXY(pos))
+                pos = ProjectToFloor(Region);
+            else
+                pos = groupPosition;
+
+            var offsetPos = pos - groupPosition;
+            var rot = GetAbsoluteOrientation();
+
+            var spec = manager.CreateSpawnSpec(group);
+            spec.EntityRef = EntityRef;
+            spec.Transform = Transform3.BuildTransform(offsetPos, rot);
+            spec.SnapToFloor = SnapToFloor;
+            if (EntityProto != null)
+                spec.AppendActions(EntityProto.EntitySelectorActions);
+            if (EntitySelectorProto != null)
+                spec.AppendActions(EntitySelectorProto.EntitySelectorActions);
+            spec.MissionRef = Parent.MissionRef;
+            spec.Properties = new();
+            spec.Properties.FlattenCopyFrom(Parent.Properties, false);
             // TODO set Rank
-            if (DebugLog) Logger.Debug($"Spawn [{worldEntity.Id}] {worldEntity.PrototypeName} {pos} [{oldZ}=>{pos.Z}] [{Parent.Objects.Count}] {GameDatabase.GetFormattedPrototypeName(Parent.ObjectProto.GetFormation().DataRef)}");
+
+            spec.Spawn();
+            if (spec.ActiveEntity != null)
+                entities.Add(spec.ActiveEntity);
+
+            return group.Id;
         }
 
         public override bool IsFormationObject()

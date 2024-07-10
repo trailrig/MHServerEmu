@@ -55,10 +55,53 @@ namespace MHServerEmu.Games.Properties
         /// <summary>
         /// Constructs a <see cref="PropertyId"/> with the provided params
         /// </summary>
+        public PropertyId(PropertyEnum propertyEnum, AssetId param0)
+        {
+            Raw = new PropertyId(propertyEnum, Property.ToParam(param0)).Raw;
+        }
+
+        /// <summary>
+        /// Constructs a <see cref="PropertyId"/> with the provided params
+        /// </summary>
+        public PropertyId(PropertyEnum propertyEnum, PrototypeId param0)
+        {
+            Raw = new PropertyId(propertyEnum, Property.ToParam(propertyEnum, 0, param0)).Raw;
+        }
+
+        /// <summary>
+        /// Constructs a <see cref="PropertyId"/> with the provided params
+        /// </summary>
+        public PropertyId(PropertyEnum propertyEnum, PropertyEnum param0)
+        {
+            // This is for properties that have enums for other properties as their params (example: Requirement)
+            PropertyInfo paramInfo = GameDatabase.PropertyInfoTable.LookupPropertyInfo(param0);
+            PrototypeId paramProtoRef = paramInfo.Prototype.DataRef;
+            Raw = new PropertyId(propertyEnum, paramProtoRef).Raw;
+        }
+
+        /// <summary>
+        /// Constructs a <see cref="PropertyId"/> with the provided params
+        /// </summary>
         public PropertyId(PropertyEnum propertyEnum, PropertyParam param0, PropertyParam param1)
         {
             PropertyInfo info = GameDatabase.PropertyInfoTable.LookupPropertyInfo(propertyEnum);
             Raw = info.EncodeParameters(propertyEnum, param0, param1).Raw;
+        }
+
+        /// <summary>
+        /// Constructs a <see cref="PropertyId"/> with the provided params
+        /// </summary>
+        public PropertyId(PropertyEnum propertyEnum, PrototypeId param0, PrototypeId param1)
+        {
+            Raw = new PropertyId(propertyEnum, Property.ToParam(propertyEnum, 0, param0), Property.ToParam(propertyEnum, 1, param1)).Raw;
+        }
+
+        /// <summary>
+        /// Constructs a <see cref="PropertyId"/> with the provided params
+        /// </summary>
+        public PropertyId(PropertyEnum propertyEnum, int param0, PrototypeId param1)
+        {
+            Raw = new PropertyId(propertyEnum, (PropertyParam)param0, Property.ToParam(propertyEnum, 1, param1)).Raw;
         }
 
         /// <summary>
@@ -86,6 +129,8 @@ namespace MHServerEmu.Games.Properties
         {
             Raw = raw;
         }
+
+        public static implicit operator PropertyId(PropertyEnum propertyEnum) => new(propertyEnum);
 
         public int CompareTo(PropertyId other)
         {

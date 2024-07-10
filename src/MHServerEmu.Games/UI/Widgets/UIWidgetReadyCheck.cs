@@ -1,7 +1,6 @@
 ﻿using System.Text;
-using Google.ProtocolBuffers;
-using MHServerEmu.Core.Extensions;
 using MHServerEmu.Core.Serialization;
+using MHServerEmu.Games.Common;
 using MHServerEmu.Games.GameData;
 
 namespace MHServerEmu.Games.UI.Widgets
@@ -14,35 +13,19 @@ namespace MHServerEmu.Games.UI.Widgets
 
     public class UIWidgetReadyCheck : UISyncData
     {
-        private readonly Dictionary<ulong, PlayerReadyState> _playerReadyStateDict = new();
+        private Dictionary<ulong, PlayerReadyState> _playerReadyStateDict = new();
 
         public UIWidgetReadyCheck(UIDataProvider uiDataProvider, PrototypeId widgetRef, PrototypeId contextRef) : base(uiDataProvider, widgetRef, contextRef) { }
 
-        public override void Decode(CodedInputStream stream, BoolDecoder boolDecoder)
+        public override bool Serialize(Archive archive)
         {
-            base.Decode(stream, boolDecoder);
+            bool success = base.Serialize(archive);
 
-            _playerReadyStateDict.Clear();
-            ulong numStates = stream.ReadRawVarint64();
-            for (ulong i = 0; i < numStates; i++)
-            {
-                ulong key = stream.ReadRawVarint64();
-                PlayerReadyState readyState = new();
-                readyState.Decode(stream);
-                _playerReadyStateDict.Add(key, readyState);
-            }
-        }
-
-        public override void Encode(CodedOutputStream stream, BoolEncoder boolEncoder)
-        {
-            base.Encode(stream, boolEncoder);
-
-            stream.WriteRawVarint64((ulong)_playerReadyStateDict.Count);
-            foreach (var kvp in _playerReadyStateDict)
-            {
-                stream.WriteRawVarint64(kvp.Key);
-                kvp.Value.Encode(stream);
-            }
+            success &= Serializer.Transfer(archive, ref _playerReadyStateDict);
+            
+            // UIWidgetReadyCheck::calculateNumberReady()
+            
+            return success;
         }
 
         protected override void BuildString(StringBuilder sb)
@@ -66,23 +49,32 @@ namespace MHServerEmu.Games.UI.Widgets
             UpdateUI();
         }
 
-        class PlayerReadyState   // ISerialize
+        class PlayerReadyState : ISerialize
         {
-            public string PlayerName { get; set; }
-            public PlayerReadyStateValue StateValue { get; set; }
+            public string PlayerName;
+            public PlayerReadyStateValue StateValue;
 
             public PlayerReadyState() { }
 
-            public void Decode(CodedInputStream stream)
+            public bool Serialize(Archive archive)
             {
-                PlayerName = stream.ReadRawString();
-                StateValue = (PlayerReadyStateValue)stream.ReadRawInt32();
-            }
+                bool success = true;
 
-            public void Encode(CodedOutputStream stream)
-            {
-                stream.WriteRawString(PlayerName);
-                stream.WriteRawInt32((int)StateValue);
+                success &= Serializer.Transfer(archive, ref PlayerName);
+
+                if (archive.IsPacking)
+                {
+                    int stateValue = (int)StateValue;
+                    success &= Serializer.Transfer(archive, ref stateValue);
+                }
+                else
+                {
+                    int stateValue = 0;
+                    success &= Serializer.Transfer(archive, ref stateValue);
+                    StateValue = (PlayerReadyStateValue)stateValue;
+                }
+
+                return success;
             }
 
             public override string ToString()

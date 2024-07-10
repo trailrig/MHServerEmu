@@ -21,7 +21,7 @@ namespace MHServerEmu.Games.Properties
 
         public bool IsFullyLoaded { get; set; }
 
-        public PropertyId PropertyId { get; }
+        public PropertyId Id { get; }
         public string PropertyName { get; }
 
         public string PropertyInfoName { get; }
@@ -40,9 +40,17 @@ namespace MHServerEmu.Games.Properties
         public bool TruncatePropertyValueToInt { get; private set; }
         public bool IsCurveProperty { get => DataType == PropertyDataType.Curve; }
 
+        // Evals
+        public EvalPrototype Eval { get => Prototype?.Eval; }
+        public bool IsEvalProperty { get => Eval != null; }
+        public bool IsEvalAlwaysCalculated { get => Prototype != null && Prototype.EvalAlwaysCalculates; }
+        public List<PropertyId> DependentEvals { get; } = new();
+        public bool HasDependentEvals { get => DependentEvals.Count > 0; }
+        public List<PropertyId> EvalDependencies { get; } = new();
+
         public PropertyInfo(PropertyEnum @enum, string propertyInfoName, PrototypeId propertyInfoPrototypeRef)
         {
-            PropertyId = new(@enum);
+            Id = new(@enum);
             PropertyInfoName = propertyInfoName;
             PropertyName = $"{PropertyInfoName}Prop";
             PropertyInfoPrototypeRef = propertyInfoPrototypeRef;
@@ -319,6 +327,18 @@ namespace MHServerEmu.Games.Properties
             // NOTE: the client also sets the values of the rest of _paramBitCounts and _paramOffsets to 0 that we don't need to do... probably
 
             _updatedInfo = true;
+            return true;
+        }
+
+        /// <summary>
+        /// Updates the default value of an eval property.
+        /// </summary>
+        public bool SetEvalDefaultValue(PropertyValue evalDefaultValue)
+        {
+            if (IsEvalProperty == false)
+                return Logger.WarnReturn(false, $"SetEvalDefaultValue(): Attempting to set default value for a non-eval property {PropertyInfoName}");
+
+            DefaultValue = evalDefaultValue;
             return true;
         }
     }

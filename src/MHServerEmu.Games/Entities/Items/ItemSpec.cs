@@ -1,71 +1,116 @@
 ﻿using System.Text;
-using Google.ProtocolBuffers;
-using MHServerEmu.Core.Extensions;
+using Gazillion;
+using MHServerEmu.Core.Serialization;
 using MHServerEmu.Games.Common;
 using MHServerEmu.Games.GameData;
-using MHServerEmu.Games.GameData.Prototypes;
 
 namespace MHServerEmu.Games.Entities.Items
 {
-    public class ItemSpec
+    public class ItemSpec : ISerialize
     {
-        public PrototypeId ItemProto { get; set; }
-        public PrototypeId Rarity { get; set; }
-        public int ItemLevel { get; set; }
-        public int CreditsAmount { get; set; }
-        public AffixSpec[] AffixSpec { get; set; }
-        public int Seed { get; set; }
-        public PrototypeId EquippableBy { get; set; }
+        private PrototypeId _itemProtoRef;
+        private PrototypeId _rarityProtoRef;
+        private int _itemLevel;
+        private int _creditsAmount;
+        private List<AffixSpec> _affixSpecList = new();
+        private int _seed;
+        private PrototypeId _equippableBy;
 
-        public ItemSpec(CodedInputStream stream)
-        {            
-            ItemProto = stream.ReadPrototypeRef<Prototype>();
-            Rarity = stream.ReadPrototypeRef<Prototype>();
-            ItemLevel = stream.ReadRawInt32();
-            CreditsAmount = stream.ReadRawInt32();
+        public PrototypeId ItemProtoRef { get => _itemProtoRef; }
+        public PrototypeId RarityProtoRef { get => _rarityProtoRef; }
+        public int ItemLevel { get => _itemLevel; }
+        public int CreditsAmount { get => _creditsAmount; }
+        public IEnumerable<AffixSpec> AffixSpecs { get => _affixSpecList; }
+        public int Seed { get => _seed; }
+        public PrototypeId EquippableBy { get => _equippableBy; }
 
-            AffixSpec = new AffixSpec[stream.ReadRawVarint64()];
-            for (int i = 0; i < AffixSpec.Length; i++)
-                AffixSpec[i] = new(stream);
+        public bool IsValid { get => _itemProtoRef != PrototypeId.Invalid && _rarityProtoRef != PrototypeId.Invalid; }
 
-            Seed = stream.ReadRawInt32();
-            EquippableBy = stream.ReadPrototypeRef<Prototype>();
+        public ItemSpec() { }
+
+        public ItemSpec(PrototypeId itemProtoRef, PrototypeId rarityProtoRef, int itemLevel, int creditsAmount, IEnumerable<AffixSpec> affixSpecs, int seed, PrototypeId equippableBy)
+        {
+            _itemProtoRef = itemProtoRef;
+            _rarityProtoRef = rarityProtoRef;
+            _itemLevel = itemLevel;
+            _creditsAmount = creditsAmount;
+            _affixSpecList.AddRange(affixSpecs);
+            _seed = seed;
+            _equippableBy = equippableBy;
         }
 
-        public ItemSpec(PrototypeId itemProto, PrototypeId rarity, int itemLevel, int creditsAmount, AffixSpec[] affixSpec, int seed, PrototypeId equippableBy)
+        public ItemSpec(NetStructItemSpec protobuf)
         {
-            ItemProto = itemProto;
-            Rarity = rarity;
-            ItemLevel = itemLevel;
-            CreditsAmount = creditsAmount;
-            AffixSpec = affixSpec;
-            Seed = seed;
-            EquippableBy = equippableBy;
+            _itemProtoRef = (PrototypeId)protobuf.ItemProtoRef;
+            _rarityProtoRef = (PrototypeId)protobuf.RarityProtoRef;
+            _itemLevel = (int)protobuf.ItemLevel;
+
+            if (protobuf.HasCreditsAmount)
+                _creditsAmount = (int)protobuf.CreditsAmount;
+
+            _affixSpecList.AddRange(protobuf.AffixSpecsList.Select(affixSpecProtobuf => new AffixSpec(affixSpecProtobuf)));
+            _seed = (int)protobuf.Seed;
+
+            if (protobuf.HasEquippableBy)
+                _equippableBy = (PrototypeId)protobuf.EquippableBy;
         }
 
-        public void Encode(CodedOutputStream stream)
+        public bool Serialize(Archive archive)
         {
-            stream.WritePrototypeRef<Prototype>(ItemProto);
-            stream.WritePrototypeRef<Prototype>(Rarity);
-            stream.WriteRawInt32(ItemLevel);
-            stream.WriteRawInt32(CreditsAmount);
-            stream.WriteRawVarint64((ulong)AffixSpec.Length);
-            foreach (AffixSpec affixSpec in AffixSpec) affixSpec.Encode(stream);
-            stream.WriteRawInt32(Seed);
-            stream.WritePrototypeRef<Prototype>(EquippableBy);
+            bool success = true;
+            success &= Serializer.Transfer(archive, ref _itemProtoRef);
+            success &= Serializer.Transfer(archive, ref _rarityProtoRef);
+            success &= Serializer.Transfer(archive, ref _itemLevel);
+            success &= Serializer.Transfer(archive, ref _creditsAmount);
+            success &= Serializer.Transfer(archive, ref _affixSpecList);
+            success &= Serializer.Transfer(archive, ref _seed);
+            success &= Serializer.Transfer(archive, ref _equippableBy);
+            return success;
+        }
+
+        public NetStructItemSpec ToProtobuf()
+        {
+            return NetStructItemSpec.CreateBuilder()
+                .SetItemProtoRef((ulong)_itemProtoRef)
+                .SetRarityProtoRef((ulong)_rarityProtoRef)
+                .SetItemLevel((uint)_itemLevel)
+                .SetCreditsAmount((uint)_creditsAmount)
+                .AddRangeAffixSpecs(_affixSpecList.Select(affixSpec => affixSpec.ToProtobuf()))
+                .SetSeed((uint)_seed)
+                .SetEquippableBy((ulong)_equippableBy)
+                .Build();
+        }
+
+        public void Set(ItemSpec other)
+        {
+            if (other == null) throw new ArgumentException("other == null");
+            if (ReferenceEquals(this, other)) return;
+
+            _itemProtoRef = other._itemProtoRef;
+            _rarityProtoRef = other._rarityProtoRef;
+            _itemLevel = other._itemLevel;
+            _creditsAmount = other._creditsAmount;
+            _seed = other._seed;
+            _equippableBy = other._equippableBy;
+
+            _affixSpecList.Clear();
+            foreach (AffixSpec otherAffixSpec in other._affixSpecList)
+                _affixSpecList.Add(new(otherAffixSpec));
         }
 
         public override string ToString()
         {
             StringBuilder sb = new();
-            sb.AppendLine($"ItemProto: {GameDatabase.GetPrototypeName(ItemProto)}");
-            sb.AppendLine($"Rarity: {GameDatabase.GetPrototypeName(Rarity)}");
-            sb.AppendLine($"ItemLevel: {ItemLevel}");
-            sb.AppendLine($"CreditsAmount: {CreditsAmount}");
-            for (int i = 0; i < AffixSpec.Length; i++) sb.AppendLine($"AffixSpec{i}: {AffixSpec[i]}");
-            sb.AppendLine($"Seed: {Seed}");
-            sb.AppendLine($"EquippableBy: {GameDatabase.GetPrototypeName(EquippableBy)}");
+            sb.AppendLine($"{nameof(_itemProtoRef)}: {GameDatabase.GetPrototypeName(_itemProtoRef)}");
+            sb.AppendLine($"{nameof(_rarityProtoRef)}: {GameDatabase.GetPrototypeName(_rarityProtoRef)}");
+            sb.AppendLine($"{nameof(_itemLevel)}: {_itemLevel}");
+            sb.AppendLine($"{nameof(_creditsAmount)}: {_creditsAmount}");
 
+            for (int i = 0; i < _affixSpecList.Count; i++)
+                sb.AppendLine($"{nameof(_affixSpecList)}[{i}]: {_affixSpecList[i]}");
+            
+            sb.AppendLine($"{nameof(_seed)}: 0x{_seed:X}");
+            sb.AppendLine($"{nameof(_equippableBy)}: {GameDatabase.GetPrototypeName(_equippableBy)}");
             return sb.ToString();
         }
     }
