@@ -10,10 +10,10 @@ namespace MHServerEmu.Games.Navi
 
     public class NaviPoint : IComparable<NaviPoint>
     {
-        public Vector3 Pos { get; internal set; }
+        public Vector3 Pos { get; set; }
         public NaviPointFlags Flags { get; set; }
-        public int Influence { get; private set; }
-        public float InfluenceRadius { get; private set; }
+        public sbyte InfluenceRef { get; set; }
+        public float InfluenceRadius { get; set; }
         public ulong Id { get; private set; }
         private static ulong NextId = 0;
 
@@ -33,6 +33,21 @@ namespace MHServerEmu.Games.Navi
             return hash;
         }
 
+        public ulong GetHash64()
+        {
+            ulong hash = 14695981039346656037;
+            hash = (hash ^ BitConverter.SingleToUInt32Bits(Pos.X)) * 1099511628211;
+            hash = (hash ^ BitConverter.SingleToUInt32Bits(Pos.Y)) * 1099511628211;
+            hash = (hash ^ BitConverter.SingleToUInt32Bits(Pos.Z)) * 1099511628211;
+            // hash = (hash ^ (byte)Flags) * 1099511628211;
+            return hash;
+        }
+
+        public string ToStringCoord2D()
+        {
+            return $"({Pos.X:F4} {Pos.Y:F4})";
+        }
+
         public string ToHashString()
         {
             return $"{GetHash():X}";
@@ -40,7 +55,7 @@ namespace MHServerEmu.Games.Navi
 
         public override string ToString()
         {
-            return $"NaviPoint ({Pos.X:F4} {Pos.Y:F4} {Pos.Z:F4}) flg:{Flags} inf:{Influence}";
+            return $"NaviPoint ({Pos.X:F4} {Pos.Y:F4} {Pos.Z:F4}) flg:{Flags} inf:{InfluenceRef}";
         }
 
         public int CompareTo(NaviPoint other)

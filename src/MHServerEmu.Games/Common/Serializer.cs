@@ -1,5 +1,4 @@
-﻿using Google.ProtocolBuffers;
-using MHServerEmu.Core.Serialization;
+﻿using MHServerEmu.Core.Serialization;
 using MHServerEmu.Core.Extensions;
 using MHServerEmu.Core.Logging;
 using MHServerEmu.Core.VectorMath;
@@ -18,40 +17,22 @@ namespace MHServerEmu.Games.Common
     {
         private static readonly Logger Logger = LogManager.CreateLogger();
 
-        #region Old
-
-        /// <summary>
-        /// Reads a prototype enum value for the specified class from the stream and converts it to a data ref.
-        /// </summary>
-        public static PrototypeId ReadPrototypeRef<T>(this CodedInputStream stream) where T : Prototype
-        {
-            return GameDatabase.DataDirectory.GetPrototypeFromEnumValue<T>((int)stream.ReadRawVarint64());
-        }
-
-        /// <summary>
-        /// Converts a prototype data ref to an enum value for the specified class and writes it to the stream.
-        /// </summary>
-        public static void WritePrototypeRef<T>(this CodedOutputStream stream, PrototypeId prototypeId) where T : Prototype
-        {
-            stream.WriteRawVarint64((ulong)GameDatabase.DataDirectory.GetPrototypeEnumValue<T>(prototypeId));
-        }
-
-        #endregion
-
         // Basic types supported by archives
 
         public static bool Transfer(Archive archive, ref bool ioData) => archive.Transfer(ref ioData);
+        public static bool Transfer(Archive archive, ref byte ioData) => archive.Transfer(ref ioData);
         public static bool Transfer(Archive archive, ref ushort ioData) => archive.Transfer(ref ioData);
         public static bool Transfer(Archive archive, ref int ioData) => archive.Transfer(ref ioData);
         public static bool Transfer(Archive archive, ref uint ioData) => archive.Transfer(ref ioData);
         public static bool Transfer(Archive archive, ref long ioData) => archive.Transfer(ref ioData);
         public static bool Transfer(Archive archive, ref ulong ioData) => archive.Transfer(ref ioData);
         public static bool Transfer(Archive archive, ref float ioData) => archive.Transfer(ref ioData);
-        public static bool Transfer(Archive archive, ref ISerialize ioData) => archive.Transfer(ref ioData);
+        public static bool Transfer<T>(Archive archive, ref T ioData) where T: ISerialize => archive.Transfer(ref ioData);
         public static bool Transfer(Archive archive, ref Vector3 ioData) => archive.Transfer(ref ioData);
         public static bool TransferFloatFixed(Archive archive, ref float ioData, int precision) => archive.TransferFloatFixed(ref ioData, precision);
         public static bool TransferVectorFixed(Archive archive, ref Vector3 ioData, int precision) => archive.TransferVectorFixed(ref ioData, precision);
         public static bool TransferOrientationFixed(Archive archive, ref Orientation ioData, bool yawOnly, int precision) => archive.TransferOrientationFixed(ref ioData, yawOnly, precision);
+        public static bool Transfer(Archive archive, ref string ioData) => archive.Transfer(ref ioData);
 
         // Data Refs
 
@@ -92,6 +73,27 @@ namespace MHServerEmu.Games.Common
                 uint enumValue = 0;
                 success &= Transfer(archive, ref enumValue);
                 ioData = GameDatabase.DataDirectory.GetPrototypeFromEnumValue<Prototype>((int)enumValue);
+            }
+
+            return success;
+        }
+
+        public static bool Transfer(Archive archive, ref LocaleStringId ioData)
+        {
+            bool success = true;
+
+            // TODO: IsPersistent
+
+            if (archive.IsPacking)
+            {
+                ulong dataId = (ulong)ioData;
+                success &= Transfer(archive, ref dataId);
+            }
+            else
+            {
+                ulong dataId = 0;
+                success &= Transfer(archive, ref dataId);
+                ioData = (LocaleStringId)dataId;
             }
 
             return success;
@@ -140,25 +142,6 @@ namespace MHServerEmu.Games.Common
             return success;
         }
 
-        public static bool Transfer(Archive archive, ref PropertyValue ioData)
-        {
-            bool success = true;
-
-            if (archive.IsPacking)
-            {
-                ulong value = ioData;
-                success &= Transfer(archive, ref value);
-            }
-            else
-            {
-                ulong value = 0;
-                success &= Transfer(archive, ref value);
-                ioData = value;
-            }
-
-            return success;
-        }
-
         // Other
 
         public static bool Transfer(Archive archive, ref TimeSpan ioData)
@@ -178,6 +161,24 @@ namespace MHServerEmu.Games.Common
             }
 
             return success;
+        }
+
+        public static bool TransferTimeAsDelta(Archive archive, Game game, ref TimeSpan gameTime)
+        {
+            // GameStartTime is always a timespan of 1 ms, so we don't actually need a game reference here
+
+            if (archive.IsPacking)
+            {
+                long delta = Game.GetTimeFromStart(gameTime);
+                return Transfer(archive, ref delta);
+            }
+            else
+            {
+                long delta = 0;
+                bool success = Transfer(archive, ref delta);
+                gameTime = Game.GetTimeFromDelta(delta);
+                return success;
+            }
         }
 
         // Collections
@@ -203,13 +204,14 @@ namespace MHServerEmu.Games.Common
             {
                 Array.Clear(ioData);
 
-                ulong numElements = 0;
-                success &= Transfer(archive, ref numElements);
+                ulong rawNumElements = 0;
+                success &= Transfer(archive, ref rawNumElements);
+                int numElements = (int)rawNumElements;  // Cast to int for easier comparisons
 
-                if (ioData.Length < (int)numElements)
+                if (ioData.Length < numElements)
                     Logger.Warn($"Transfer(): Array length {ioData} is not enough to hold {numElements} elements");
                 
-                for (int i = 0; i < ioData.Length; i++)
+                for (int i = 0; i < numElements && i < ioData.Length; i++)
                 {
                     ulong value = 0;
                     success &= Transfer(archive, ref value);
@@ -217,7 +219,7 @@ namespace MHServerEmu.Games.Common
                 }
 
                 // Elements outside the range of the provided array are discarded
-                for (ulong i = (ulong)ioData.Length; i < numElements; i++)
+                for (int i = ioData.Length; i < numElements; i++)
                 {
                     ulong value = 0;
                     success &= Transfer(archive, ref value);
@@ -245,13 +247,14 @@ namespace MHServerEmu.Games.Common
             {
                 Array.Clear(ioData);
 
-                ulong numElements = 0;
-                success &= Transfer(archive, ref numElements);
+                ulong rawNumElements = 0;
+                success &= Transfer(archive, ref rawNumElements);
+                int numElements = (int)rawNumElements;  // Cast to int for easier comparisons
 
-                if (ioData.Length < (int)numElements)
+                if (ioData.Length < numElements)
                     Logger.Warn($"Transfer(): Array length {ioData} is not enough to hold {numElements} elements");
 
-                for (int i = 0; i < ioData.Length; i++)
+                for (int i = 0; i < numElements && i < ioData.Length; i++)
                 {
                     long value = 0;
                     success &= Transfer(archive, ref value);
@@ -259,7 +262,7 @@ namespace MHServerEmu.Games.Common
                 }
 
                 // Elements outside the range of the provided array are discarded
-                for (ulong i = (ulong)ioData.Length; i < numElements; i++)
+                for (int i = ioData.Length; i < numElements; i++)
                 {
                     long value = 0;
                     success &= Transfer(archive, ref value);
@@ -287,13 +290,14 @@ namespace MHServerEmu.Games.Common
             {
                 Array.Clear(ioData);
 
-                ulong numElements = 0;
-                success &= Transfer(archive, ref numElements);
+                ulong rawNumElements = 0;
+                success &= Transfer(archive, ref rawNumElements);
+                int numElements = (int)rawNumElements;  // Cast to int for easier comparisons
 
-                if (ioData.Length < (int)numElements)
+                if (ioData.Length < numElements)
                     Logger.Warn($"Transfer(): Array length {ioData} is not enough to hold {numElements} elements");
 
-                for (int i = 0; i < ioData.Length; i++)
+                for (int i = 0; i < numElements && i < ioData.Length; i++)
                 {
                     PrototypeId value = PrototypeId.Invalid;
                     success &= Transfer(archive, ref value);
@@ -301,7 +305,7 @@ namespace MHServerEmu.Games.Common
                 }
 
                 // Elements outside the range of the provided array are discarded
-                for (ulong i = (ulong)ioData.Length; i < numElements; i++)
+                for (int i = ioData.Length; i < numElements; i++)
                 {
                     ulong value = 0;
                     success &= Transfer(archive, ref value);
@@ -320,32 +324,29 @@ namespace MHServerEmu.Games.Common
                 ulong numElements = (ulong)ioData.Length;
                 success &= Transfer(archive, ref numElements);
                 for (int i = 0; i < ioData.Length; i++)
-                {
-                    ISerialize value = ioData[i];
-                    success &= Transfer(archive, ref value);
-                }
+                    success &= Transfer(archive, ref ioData[i]);
             }
             else
             {
                 Array.Clear(ioData);
 
-                ulong numElements = 0;
-                success &= Transfer(archive, ref numElements);
+                ulong rawNumElements = 0;
+                success &= Transfer(archive, ref rawNumElements);
+                int numElements = (int)rawNumElements;  // Cast to int for easier comparisons
 
-                if (ioData.Length < (int)numElements)
+                if (ioData.Length < numElements)
                     Logger.Warn($"Transfer(): Array length {ioData} is not enough to hold {numElements} elements");
 
-                for (int i = 0; i < ioData.Length; i++)
+                for (int i = 0; i < numElements && i < ioData.Length; i++)
                 {
-                    ISerialize value = new T();
-                    success &= Transfer(archive, ref value);
-                    ioData[i] = (T)value;
+                    ioData[i] = new();
+                    success &= Transfer(archive, ref ioData[i]);
                 }
 
                 // Elements outside the range of the provided array are discarded
-                for (ulong i = (ulong)ioData.Length; i < numElements; i++)
+                for (int i = ioData.Length; i < numElements; i++)
                 {
-                    ISerialize value = new T();
+                    T value = new();
                     success &= Transfer(archive, ref value);
                 }
             }
@@ -463,7 +464,7 @@ namespace MHServerEmu.Games.Common
                 success &= Transfer(archive, ref numElements);
                 foreach (T data in ioData)
                 {
-                    ISerialize value = data;
+                    T value = data;
                     success &= Transfer(archive, ref value);
                 }
             }
@@ -476,9 +477,9 @@ namespace MHServerEmu.Games.Common
 
                 for (ulong i = 0; i < numElements; i++)
                 {
-                    ISerialize value = new T();
+                    T value = new();
                     success &= Transfer(archive, ref value);
-                    ioData.Add((T)value);
+                    ioData.Add(value);
                 }
             }
 
@@ -488,6 +489,43 @@ namespace MHServerEmu.Games.Common
         #endregion
 
         #region Dictionaries
+
+        public static bool Transfer<T>(Archive archive, ref Dictionary<ulong, T> ioData) where T : ISerialize, new()
+        {
+            bool success = true;
+
+            if (archive.IsPacking)
+            {
+                ulong numElements = (ulong)ioData.Count;
+                success &= Transfer(archive, ref numElements);
+                foreach (var kvp in ioData)
+                {
+                    ulong key = kvp.Key;
+                    success &= Transfer(archive, ref key);
+                    T value = kvp.Value;
+                    success &= Transfer(archive, ref value);
+                }
+            }
+            else
+            {
+                ioData.Clear();
+
+                ulong numElements = 0;
+                success &= Transfer(archive, ref numElements);
+
+                for (ulong i = 0; i < numElements; i++)
+                {
+                    ulong key = 0;
+                    success &= Transfer(archive, ref key);
+                    T value = new();
+                    success &= Transfer(archive, ref value);
+
+                    ioData.Add(key, (T)value);
+                }
+            }
+
+            return success;
+        }
 
         public static bool Transfer<T>(Archive archive, ref Dictionary<PrototypeId, T> ioData) where T: ISerialize, new()
         {
@@ -501,7 +539,7 @@ namespace MHServerEmu.Games.Common
                 {
                     PrototypeId key = kvp.Key;
                     success &= Transfer(archive, ref key);
-                    ISerialize value = kvp.Value;
+                    T value = kvp.Value;
                     success &= Transfer(archive, ref value);
                 }
             }
@@ -516,10 +554,10 @@ namespace MHServerEmu.Games.Common
                 {
                     PrototypeId key = 0;
                     success &= Transfer(archive, ref key);
-                    ISerialize value = new T();
+                    T value = new();
                     success &= Transfer(archive, ref value);
 
-                    ioData.Add(key, (T)value);
+                    ioData.Add(key, value);
                 }
             }
 
@@ -539,7 +577,7 @@ namespace MHServerEmu.Games.Common
                 {
                     uint key = kvp.Key;
                     success &= Transfer(archive, ref key);
-                    ISerialize value = kvp.Value;
+                    T value = kvp.Value;
                     success &= Transfer(archive, ref value);
                 }
             }
@@ -554,9 +592,9 @@ namespace MHServerEmu.Games.Common
                 {
                     uint key = 0;
                     success &= Transfer(archive, ref key);
-                    ISerialize value = new T();
+                    T value = new();
                     success &= Transfer(archive, ref value);
-                    ioData.Add(key, (T)value);
+                    ioData.Add(key, value);
                 }
             }
 
@@ -576,7 +614,7 @@ namespace MHServerEmu.Games.Common
                 {
                     ulong key = (ulong)kvp.Key;
                     success &= Transfer(archive, ref key);
-                    ISerialize value = kvp.Value;
+                    T value = kvp.Value;
                     success &= Transfer(archive, ref value);
                 }
             }
@@ -591,9 +629,9 @@ namespace MHServerEmu.Games.Common
                 {
                     ulong key = 0;
                     success &= Transfer(archive, ref key);
-                    ISerialize value = new T();
+                    T value = new();
                     success &= Transfer(archive, ref value);
-                    ioData.Add((PrototypeGuid)key, (T)value);
+                    ioData.Add((PrototypeGuid)key, value);
                 }
             }
 
@@ -675,6 +713,40 @@ namespace MHServerEmu.Games.Common
         }
 
         #endregion
+
+        // Sets
+        public static bool Transfer(Archive archive, ref SortedSet<ulong> ioData)
+        {
+            bool success = true;
+
+            if (archive.IsPacking)
+            {
+                ulong numElements = (ulong)ioData.Count;
+                success &= Transfer(archive, ref numElements);
+                foreach (ulong data in ioData)
+                {
+                    ulong value = data;
+                    success &= Transfer(archive, ref value);
+                }
+            }
+            else
+            {
+                ioData.Clear();
+
+                ulong numElements = 0;
+                success &= Transfer(archive, ref numElements);
+
+                for (ulong i = 0; i < numElements; i++)
+                {
+                    ulong value = 0;
+                    success &= Transfer(archive, ref value);
+                    ioData.Add(value);
+                }
+            }
+
+            return success;
+        }
+
 
         // Class-specific
         public static bool Transfer(Archive archive, ref SortedSet<AvailableBadges> ioData)

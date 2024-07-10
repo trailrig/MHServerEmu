@@ -1,6 +1,5 @@
 ﻿using System.Text;
 using Gazillion;
-using Google.ProtocolBuffers;
 using MHServerEmu.Core.Logging;
 using MHServerEmu.Core.Serialization;
 using MHServerEmu.Games.Common;
@@ -11,7 +10,7 @@ using MHServerEmu.Games.UI.Widgets;
 
 namespace MHServerEmu.Games.UI
 {
-    public class UIDataProvider
+    public class UIDataProvider : ISerialize
     {
         private static readonly Logger Logger = LogManager.CreateLogger();
 
@@ -22,33 +21,37 @@ namespace MHServerEmu.Games.UI
 
         public UIDataProvider() { }
 
-        public UIDataProvider(CodedInputStream stream, BoolDecoder boolDecoder)
+        public bool Serialize(Archive archive)
         {
-            ulong numWidgets = stream.ReadRawVarint64();
+            bool success = true;
 
-            for (ulong i = 0; i < numWidgets; i++)
+            uint numWidgets = (uint)_dataDict.Count;
+            success &= Serializer.Transfer(archive, ref numWidgets);
+
+            if (archive.IsPacking)
             {
-                PrototypeId widgetRef = stream.ReadPrototypeRef<Prototype>();
-                PrototypeId contextRef = stream.ReadPrototypeRef<Prototype>();
-                UpdateOrCreateUIWidget(widgetRef, contextRef, stream, boolDecoder);                
+                foreach (var kvp in _dataDict)
+                {
+                    PrototypeId widgetRef = kvp.Key.Item1;
+                    PrototypeId contextRef = kvp.Key.Item2;
+                    success &= Serializer.Transfer(archive, ref widgetRef);
+                    success &= Serializer.Transfer(archive, ref contextRef);
+                    success &= kvp.Value.Serialize(archive);
+                }
             }
-        }
-
-        public void Encode(CodedOutputStream stream, BoolEncoder boolEncoder)
-        {
-            stream.WriteRawVarint64((ulong)_dataDict.Count);
-            foreach (var kvp in _dataDict)
+            else
             {
-                stream.WritePrototypeRef<Prototype>(kvp.Key.Item1);
-                stream.WritePrototypeRef<Prototype>(kvp.Key.Item2);
-                kvp.Value.Encode(stream, boolEncoder);
+                for (uint i = 0; i < numWidgets; i++)
+                {
+                    PrototypeId widgetRef = PrototypeId.Invalid;
+                    PrototypeId contextRef = PrototypeId.Invalid;
+                    success &= Serializer.Transfer(archive, ref widgetRef);
+                    success &= Serializer.Transfer(archive, ref contextRef);
+                    success &= UpdateOrCreateUIWidget(widgetRef, contextRef, archive) != null;
+                }
             }
-        }
 
-        public void EncodeBools(BoolEncoder boolEncoder)
-        {
-            foreach (UISyncData uiData in _dataDict.Values)
-                uiData.EncodeBools(boolEncoder);
+            return success;
         }
 
         public override string ToString()
@@ -119,13 +122,12 @@ namespace MHServerEmu.Games.UI
             return uiSyncData;
         }
 
-        // TODO: stream + decoder -> archive
-        private UISyncData UpdateOrCreateUIWidget(PrototypeId widgetRef, PrototypeId contextRef, CodedInputStream stream, BoolDecoder boolDecoder)
+        private UISyncData UpdateOrCreateUIWidget(PrototypeId widgetRef, PrototypeId contextRef, Archive archive)
         {
             if (_dataDict.TryGetValue((widgetRef, contextRef), out UISyncData uiData) == false)
                 uiData = AllocateUIWidget(widgetRef, contextRef);
 
-            uiData.Decode(stream, boolDecoder);
+            uiData.Serialize(archive);
             uiData.UpdateUI();
 
             return uiData;

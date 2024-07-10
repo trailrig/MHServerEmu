@@ -1,5 +1,6 @@
 ﻿using MHServerEmu.Core.Collisions;
 using MHServerEmu.Core.Extensions;
+using MHServerEmu.Core.Helpers;
 using MHServerEmu.Core.System.Random;
 using MHServerEmu.Core.VectorMath;
 using MHServerEmu.Games.GameData;
@@ -64,7 +65,7 @@ namespace MHServerEmu.Games.Generators.Areas
                         if (Log) Logger.Error("PreGenerate entry unknown");
                     }
                 }
-                GridSize = (int)Math.Sqrt(totalCells) + 1;
+                GridSize = (int)MathHelper.SquareRoot(totalCells) + 1;
 
                 CellSize = proto.CellSize;
                 HalfCellSize = CellSize / 2.0f;
@@ -172,7 +173,7 @@ namespace MHServerEmu.Games.Generators.Areas
             CellSettings settings = new()
             {
                 CellRef = cellRef,
-                PositionInArea = new(positionInArea),
+                PositionInArea = positionInArea,
                 OverrideLocationName = locationName
             };
 
@@ -183,7 +184,7 @@ namespace MHServerEmu.Games.Generators.Areas
             return cell;
         }
 
-        public override bool GetPossibleConnections(ConnectionList connections, Segment segment)
+        public override bool GetPossibleConnections(ConnectionList connections, in Segment segment)
         {
             return false;
         }

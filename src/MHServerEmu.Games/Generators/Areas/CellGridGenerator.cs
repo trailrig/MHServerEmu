@@ -1,4 +1,5 @@
-﻿using MHServerEmu.Core.Extensions;
+﻿using MHServerEmu.Core.Collections;
+using MHServerEmu.Core.Extensions;
 using MHServerEmu.Core.System.Random;
 using MHServerEmu.Core.VectorMath;
 using MHServerEmu.Games.GameData;
@@ -212,7 +213,7 @@ namespace MHServerEmu.Games.Generators.Areas
                             CellSettings cellSettings = new() 
                             {
                                 CellRef = genCell.CellRef,
-                                PositionInArea = new(genCell.Position),
+                                PositionInArea = genCell.Position,
                                 Seed = ++randomSeed,
                                 ConnectedCells = connectedCells,
                                 PopulationThemeOverrideRef = genCell.PopulationThemeOverrideRef
@@ -243,7 +244,7 @@ namespace MHServerEmu.Games.Generators.Areas
                             CellSettings cellSettings = new()
                             {
                                 CellRef = cellRef,
-                                PositionInArea = new(genCell.Position),
+                                PositionInArea = genCell.Position,
                                 Seed = ++randomSeed,
                                 ConnectedCells = connectedCells,
                                 PopulationThemeOverrideRef = genCell.PopulationThemeOverrideRef

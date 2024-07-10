@@ -1,19 +1,16 @@
 ﻿using System.Text;
-using Google.ProtocolBuffers;
-using MHServerEmu.Core.Extensions;
 using MHServerEmu.Core.Logging;
 using MHServerEmu.Core.Serialization;
-using MHServerEmu.Core.System;
+using MHServerEmu.Core.System.Time;
 using MHServerEmu.Games.Common;
 using MHServerEmu.Games.GameData;
-using MHServerEmu.Games.GameData.Prototypes;
 
 namespace MHServerEmu.Games.UI
 {
     /// <summary>
     /// Base class for serializable UI widget data.
     /// </summary>
-    public class UISyncData
+    public class UISyncData : ISerialize
     {
         private static readonly Logger Logger = LogManager.CreateLogger();
 
@@ -36,22 +33,35 @@ namespace MHServerEmu.Games.UI
             _contextRef = contextRef;
         }
 
-        public virtual void Decode(CodedInputStream stream, BoolDecoder boolDecoder)
+        public virtual bool Serialize(Archive archive)
         {
-            _areaList.Clear();
-            int numAreas = stream.ReadRawInt32();
-            for (int i = 0; i < numAreas; i++)
-                _areaList.Add(stream.ReadPrototypeRef<Prototype>());
-        }
+            bool success = true;
 
-        public virtual void Encode(CodedOutputStream stream, BoolEncoder boolEncoder)
-        {
-            stream.WriteRawInt32(_areaList.Count);
-            foreach (PrototypeId areaRef in _areaList)
-                stream.WritePrototypeRef<Prototype>(areaRef);
-        }
+            int numAreas = _areaList.Count;
+            success &= Serializer.Transfer(archive, ref numAreas);
 
-        public virtual void EncodeBools(BoolEncoder boolEncoder) { }
+            if (archive.IsPacking)
+            {
+                for (int i = 0; i < _areaList.Count; i++)
+                {
+                    PrototypeId areaRef = _areaList[i];
+                    success &= Serializer.Transfer(archive, ref areaRef);
+                }
+            }
+            else
+            {
+                _areaList.Clear();
+                
+                for (int i = 0; i < numAreas; i++)
+                {
+                    PrototypeId areaRef = PrototypeId.Invalid;
+                    success &= Serializer.Transfer(archive, ref areaRef);
+                    _areaList.Add(areaRef);
+                }
+            }
+
+            return success;
+        }
 
         public virtual void UpdateUI() { }
 
@@ -106,8 +116,8 @@ namespace MHServerEmu.Games.UI
             for (int i = 0; i < _areaList.Count; i++)
                 sb.AppendLine($"{nameof(_areaList)}[{i}]: {_areaList[i]}");
 
-            sb.AppendLine($"{nameof(_timeStart)}: {_timeStart}");
-            sb.AppendLine($"{nameof(_timeEnd)}: {_timeEnd}");
+            sb.AppendLine($"{nameof(_timeStart)}: {(_timeStart != 0 ? Clock.GameTimeMillisecondsToDateTime(_timeStart) : 0)}");
+            sb.AppendLine($"{nameof(_timeEnd)}: {(_timeEnd != 0 ? Clock.GameTimeMillisecondsToDateTime(_timeEnd) : 0)}");
             sb.AppendLine($"{nameof(_timePaused)}: {_timePaused}");
         }
     }

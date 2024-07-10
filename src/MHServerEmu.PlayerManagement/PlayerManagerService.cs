@@ -4,8 +4,7 @@ using MHServerEmu.Core.Config;
 using MHServerEmu.Core.Logging;
 using MHServerEmu.Core.Network;
 using MHServerEmu.Core.Network.Tcp;
-using MHServerEmu.Core.System;
-using MHServerEmu.DatabaseAccess;
+using MHServerEmu.Core.System.Time;
 using MHServerEmu.Frontend;
 using MHServerEmu.Games;
 using MHServerEmu.Games.Achievements;
@@ -16,16 +15,20 @@ namespace MHServerEmu.PlayerManagement
     /// <summary>
     /// An <see cref="IGameService"/> that manages connected players and routes messages to relevant <see cref="Game"/> instances.
     /// </summary>
-    public class PlayerManagerService : IGameService, IFrontendService
+    public class PlayerManagerService : IGameService, IFrontendService, IMessageBroadcaster
     {
+        // TODO: Implement a way to request saves from the game without disconnecting.
+
         private const ushort MuxChannel = 1;   // All messages come to and from PlayerManager over mux channel 1
+        private const int MaxAsyncRetryAttempts = 10;
+        private const int GameFrameTimeMS = 50;
 
         private static readonly Logger Logger = LogManager.CreateLogger();
 
         private readonly SessionManager _sessionManager;
         private readonly GameManager _gameManager;
-        private readonly object _playerLock = new();
         private readonly Dictionary<ulong, FrontendClient> _playerDict = new();
+        private readonly Dictionary<ulong, Task> _pendingSaveDict = new();
 
         private readonly string _frontendAddress;
         private readonly string _frontendPort;
@@ -58,6 +61,16 @@ namespace MHServerEmu.PlayerManagement
         public void Shutdown()
         {
             // TODO: Shut down all games
+
+            // Wait for all data to be saved
+            bool waitingForSave;
+            lock (_pendingSaveDict) waitingForSave = _pendingSaveDict.Count > 0;
+
+            while (waitingForSave)
+            {
+                Thread.Sleep(1);
+                lock (_pendingSaveDict) waitingForSave = _pendingSaveDict.Count > 0;
+            }
         }
 
         public void Handle(ITcpClient tcpClient, MessagePackage message)
@@ -90,7 +103,7 @@ namespace MHServerEmu.PlayerManagement
                         return;
                     }
 
-                    game.Handle(client, message);
+                    game.PostMessage(client, message);
                     break;
             }
         }
@@ -108,7 +121,8 @@ namespace MHServerEmu.PlayerManagement
 
         public string GetStatus()
         {
-            return $"Sessions: {_sessionManager.SessionCount} | Games: {_gameManager.GameCount}";
+            lock (_pendingSaveDict)
+                return $"Sessions: {_sessionManager.SessionCount} | Games: {_gameManager.GameCount} | Pending Saves: {_pendingSaveDict.Count}";
         }
 
         #endregion
@@ -127,51 +141,51 @@ namespace MHServerEmu.PlayerManagement
 
         public bool AddFrontendClient(FrontendClient client)
         {
-            lock (_playerLock)
+            if (client.Session == null || client.Session.Account == null)
+                return Logger.WarnReturn(false, "AddFrontendClient(): The client has no valid session assigned");
+
+            ulong playerDbId = client.Session.Account.Id;
+
+            lock (_playerDict)
             {
-                if (client.Session == null || client.Session.Account == null)
-                    return Logger.WarnReturn(false, "AddFrontendClient(): The client has no valid session assigned");
-
-                ulong playerId = client.Session.Account.Id;
-
                 // Handle duplicate login by disconnecting the existing player
-                if (_playerDict.TryGetValue(playerId, out FrontendClient existingClient))
+                if (_playerDict.TryGetValue(playerDbId, out FrontendClient existingClient))
                 {
-                    Logger.Info($"Duplicate login for {client.Session.Account}, terminating existing session {existingClient.Session.Id}");
+                    Logger.Info($"Duplicate login for {client}, terminating existing session 0x{existingClient.Session.Id:X}");
                     existingClient.Disconnect();
-                    ((ClientSession)client.Session).RefreshAccount();   // Replace outdated data retrieved before the existing session was terminated
                 }
 
-                _playerDict.Add(client.Session.Account.Id, client);
-                _gameManager.GetAvailableGame().AddPlayer(client);
+                _playerDict.Add(playerDbId, client);
             }
 
+            // Player is added to a game asynchronously as a task because their data may be pending a save after a previous session.
+            Task.Run(async () => await AddPlayerToGameAsync(client));
+            
             return true;
         }
 
         public bool RemoveFrontendClient(FrontendClient client)
         {
-            lock (_playerLock)
+            if (client.Session == null || client.Session.Account == null)
+                return Logger.WarnReturn(false, "RemoveFrontendClient(): The client has no valid session assigned");
+
+            ulong playerDbId = client.Session.Account.Id;
+
+            lock (_playerDict)
             {
-                if (client.Session == null || client.Session.Account == null)
-                    return Logger.WarnReturn(false, "RemoveFrontendClient(): The client has no valid session assigned");
-
-                ulong playerId = client.Session.Account.Id;
-
                 if (_playerDict.ContainsKey(client.Session.Account.Id) == false)
-                    return Logger.WarnReturn(false, $"RemoveFrontendClient(): Player {client.Session.Account} not found");
+                    return Logger.WarnReturn(false, $"RemoveFrontendClient(): Player {client} not found");
 
-                GetGameByPlayer(client)?.RemovePlayer(client);
-
-                _playerDict.Remove(playerId);
-                _sessionManager.RemoveSession(client.Session.Id);
+                _playerDict.Remove(playerDbId);
             }
 
-            if (Config.BypassAuth == false)
-                DBManager.UpdateAccountData(client.Session.Account);
-            else
-                AccountManager.SaveDefaultAccount();
+            _sessionManager.RemoveSession(client.Session.Id);
+            GetGameByPlayer(client)?.RemoveClient(client);
 
+            // Account data is saved asynchronously as a task because it takes some time for a player to leave a game
+            lock (_pendingSaveDict)
+                _pendingSaveDict.Add(playerDbId, Task.Run(async () => await SavePlayerDataAsync(client)));
+            
             return true;
         }
 
@@ -203,10 +217,89 @@ namespace MHServerEmu.PlayerManagement
         /// </summary>
         public void BroadcastMessage(IMessage message)
         {
-            lock (_playerLock)
+            lock (_playerDict)
             {
                 foreach (FrontendClient player in _playerDict.Values)
                     player.SendMessage(MuxChannel, message);
+            }
+        }
+
+        /// <summary>
+        /// Asynchronously waits for any pending account data saves and then adds the provided <see cref="FrontendClient"/> to an available game.
+        /// </summary>
+        private async Task AddPlayerToGameAsync(FrontendClient client)
+        {
+            ulong playerDbId = client.Session.Account.Id;
+            int numAttempts = 0;
+            bool hasSavePending = false;
+            bool refreshRequired = false;
+
+            while (true)
+            {
+                numAttempts++;
+
+                lock (_pendingSaveDict)
+                    hasSavePending = _pendingSaveDict.ContainsKey(playerDbId);
+
+                if (hasSavePending == false) break;
+
+                refreshRequired = true;
+
+                if (numAttempts >= MaxAsyncRetryAttempts)
+                {
+                    Logger.Warn($"AddPlayerToGameAsync(): Failed to add player to a game after {numAttempts} attempts, disconnecting");
+                    client.Disconnect();
+                    return;
+                }
+
+                await Task.Delay(GameFrameTimeMS);
+            }
+
+            // If we had to wait for a pending save, it means our account data is not up to date and needs to be refreshed.
+            if (refreshRequired)
+                ((ClientSession)client.Session).RefreshAccount();
+
+            // Add the client to an available game once pending saves have been resolved
+            _gameManager.GetAvailableGame().AddClient(client);
+        }
+
+        /// <summary>
+        /// Asynchronously waits for the provided <see cref="FrontendClient"/> to leave the game and then saves their data.
+        /// </summary>
+        private async Task SavePlayerDataAsync(FrontendClient client)
+        {
+            ulong playerDbId = client.Session.Account.Id;
+            int numAttempts = 0;
+
+            while (true)
+            {
+                numAttempts++;
+
+                // Wait for the client to leave the game they are in
+                if (client.IsInGame)
+                {
+                    // Players should generally leave games during the next game update.
+                    // If it didn't happen, something must have gone terribly wrong.
+                    if (numAttempts >= MaxAsyncRetryAttempts)
+                    {
+                        Logger.Warn($"SavePlayerDataAsync(): Failed to save player data after {numAttempts} attempts, bailing out");
+                        lock (_pendingSaveDict) _pendingSaveDict.Remove(playerDbId);
+                        return;
+                    }
+
+                    await Task.Delay(GameFrameTimeMS);
+                    continue;
+                }
+
+                // Save data and remove pending save
+                if (Config.BypassAuth == false)
+                    AccountManager.DBManager.UpdateAccountData(client.Session.Account);    // Save to the database when we have our full account system enabled
+                else
+                    AccountManager.SaveDefaultAccount();                    // Save to a JSON file when we are using bypass auth
+
+                lock (_pendingSaveDict) _pendingSaveDict.Remove(playerDbId);
+                Logger.Info($"Saved data for player {client}");
+                return;
             }
         }
 
@@ -225,9 +318,10 @@ namespace MHServerEmu.PlayerManagement
 
             if (statusCode == AuthStatusCode.Success)
             {
+                // Avoid extra allocations and copying by using Unsafe.FromBytes() for session key and token
                 authTicket = AuthTicket.CreateBuilder()
-                    .SetSessionKey(ByteString.CopyFrom(session.Key))
-                    .SetSessionToken(ByteString.CopyFrom(session.Token))
+                    .SetSessionKey(ByteString.Unsafe.FromBytes(session.Key))
+                    .SetSessionToken(ByteString.Unsafe.FromBytes(session.Token))
                     .SetSessionId(session.Id)
                     .SetFrontendServer(_frontendAddress)
                     .SetFrontendPort(_frontendPort)

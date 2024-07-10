@@ -1,6 +1,6 @@
 ﻿using System.Text;
-using Google.ProtocolBuffers;
 using MHServerEmu.Core.Serialization;
+using MHServerEmu.Games.Common;
 using MHServerEmu.Games.GameData;
 
 namespace MHServerEmu.Games.UI.Widgets
@@ -18,22 +18,36 @@ namespace MHServerEmu.Games.UI.Widgets
 
         public UIWidgetButton(UIDataProvider uiDataProvider, PrototypeId widgetRef, PrototypeId contextRef) : base(uiDataProvider, widgetRef, contextRef) { }
 
-        public override void Decode(CodedInputStream stream, BoolDecoder boolDecoder)
+        public override bool Serialize(Archive archive)
         {
-            base.Decode(stream, boolDecoder);
+            bool success = true;
 
-            uint numCallbacks = stream.ReadRawVarint32();
-            for (uint i = 0; i < numCallbacks; i++)
-                _callbackList.Add(new(stream.ReadRawVarint64()));
-        }
+            success &= base.Serialize(archive);
 
-        public override void Encode(CodedOutputStream stream, BoolEncoder boolEncoder)
-        {
-            base.Encode(stream, boolEncoder);
+            uint numCallbacks = (uint)_callbackList.Count;
+            success &= Serializer.Transfer(archive, ref numCallbacks);
 
-            stream.WriteRawVarint32((uint)_callbackList.Count);
-            foreach (CallbackBase callback in _callbackList)
-                stream.WriteRawVarint64(callback.PlayerGuid);
+            if (archive.IsPacking)
+            {
+                foreach (CallbackBase callback in _callbackList)
+                {
+                    ulong playerGuid = callback.PlayerGuid;
+                    success &= Serializer.Transfer(archive, ref playerGuid);
+                }
+            }
+            else
+            {
+                _callbackList.Clear();
+                for (uint i = 0; i < numCallbacks; i++)
+                {
+                    ulong playerGuid = 0;
+                    success &= Serializer.Transfer(archive, ref playerGuid);
+                    CallbackBase callback = new(playerGuid);
+                    _callbackList.Add(callback);
+                }
+            }
+
+            return success;
         }
 
         protected override void BuildString(StringBuilder sb)

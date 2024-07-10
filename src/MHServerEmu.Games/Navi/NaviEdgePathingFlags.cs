@@ -10,6 +10,7 @@ namespace MHServerEmu.Games.Navi
         Power = 1 << 2,
         Sight = 1 << 3,
         TallWalk = 1 << 4,
+        BlackOutZone = 1 << 5,
     }
 
     [Flags]
@@ -38,27 +39,27 @@ namespace MHServerEmu.Games.Navi
 
     public interface IContainsPathFlagsCheck
     {
-        bool CanBypassCheck(); // Inverted return
-        bool PathingFlagsCheck(PathFlags pathingFlags);
+        public bool CanBypassCheck(); // Inverted return
+        public bool PathingFlagsCheck(PathFlags pathingFlags);
     }
 
-    public class DefaultContainsPathFlagsCheck : IContainsPathFlagsCheck
+    public readonly struct DefaultContainsPathFlagsCheck : IContainsPathFlagsCheck
     {
-        public PathFlags PathFlags { get; set; }
+        private readonly PathFlags _pathFlags;
 
         public DefaultContainsPathFlagsCheck(PathFlags pathFlags)
         {
-            PathFlags = pathFlags;
+            _pathFlags = pathFlags;
         }
 
         public bool CanBypassCheck() 
         {
-            return PathFlags != PathFlags.None;
+            return _pathFlags != PathFlags.None;
         }
 
         public bool PathingFlagsCheck(PathFlags pathingFlags)
         {
-            return pathingFlags.HasFlag(PathFlags);
+            return pathingFlags.HasFlag(_pathFlags);
         }
     }
 
@@ -96,6 +97,22 @@ namespace MHServerEmu.Games.Navi
             hash = (hash ^ (uint)RemovePower) * 16777619;
             hash = (hash ^ (uint)AddSight) * 16777619;
             hash = (hash ^ (uint)RemoveSight) * 16777619;
+
+            return hash;
+        }
+
+        public ulong GetHash64()
+        {
+            ulong hash = 14695981039346656037;
+
+            hash = (hash ^ (uint)AddWalk) * 1099511628211;
+            hash = (hash ^ (uint)RemoveWalk) * 1099511628211;
+            hash = (hash ^ (uint)AddFly) * 1099511628211;
+            hash = (hash ^ (uint)RemoveFly) * 1099511628211;
+            hash = (hash ^ (uint)AddPower) * 1099511628211;
+            hash = (hash ^ (uint)RemovePower) * 1099511628211;
+            hash = (hash ^ (uint)AddSight) * 1099511628211;
+            hash = (hash ^ (uint)RemoveSight) * 1099511628211;
 
             return hash;
         }
@@ -280,6 +297,14 @@ namespace MHServerEmu.Games.Navi
             uint hash = 2166136261;
             hash = (hash ^ ContentFlagCounts[0].GetHash()) * 16777619;
             hash = hash ^ ContentFlagCounts[1].GetHash();
+            return hash;
+        }
+
+        public ulong GetHash64()
+        {
+            ulong hash = 14695981039346656037;
+            hash = (hash ^ ContentFlagCounts[0].GetHash64()) * 1099511628211;
+            hash = hash ^ ContentFlagCounts[1].GetHash64();
             return hash;
         }
     }

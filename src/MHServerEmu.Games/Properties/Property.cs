@@ -1,6 +1,4 @@
-﻿using Gazillion;
-using MHServerEmu.Core.Extensions;
-using MHServerEmu.Games.GameData;
+﻿using MHServerEmu.Games.GameData;
 using MHServerEmu.Games.GameData.Calligraphy;
 using MHServerEmu.Games.GameData.Calligraphy.Attributes;
 
@@ -21,7 +19,8 @@ namespace MHServerEmu.Games.Properties
         Time,
         Guid,
         RegionId,
-        Int21Vector3
+        Int21Vector3,
+        Invalid = -1,
     }
 
     [AssetEnum((int)None)]
@@ -62,7 +61,7 @@ namespace MHServerEmu.Games.Properties
         None    = 0,
         Flag0   = 1 << 0,
         Flag1   = 1 << 1,
-        Flag2   = 1 << 2
+        Refresh = 1 << 2
     }
 
     #endregion
@@ -114,6 +113,21 @@ namespace MHServerEmu.Games.Properties
             FromParam(propertyId.Enum, paramIndex, paramValue, out prototypeId);
         }
 
+        public static void FromParam(PropertyId propertyId, int paramIndex, out int value)
+        {
+            value = (int)propertyId.GetParam(paramIndex);
+        }
+
+        public static void FromParam(PropertyId propertyId, int paramIndex, out AssetId assetId)
+        {
+            FromParam(propertyId.Enum, paramIndex, propertyId.GetParam(paramIndex), out assetId);
+        }
+
+        public static void FromParam(PropertyId propertyId, int paramIndex, out PrototypeId prototypeId)
+        {
+            FromParam(propertyId.Enum, paramIndex, propertyId.GetParam(paramIndex), out prototypeId);
+        }
+
         public static PropertyParam ToParam(AssetId paramValue)
         {
             return (PropertyParam)GameDatabase.DataDirectory.AssetDirectory.GetEnumValue(paramValue);
@@ -127,23 +141,5 @@ namespace MHServerEmu.Games.Properties
         }
 
         // ToValue() and FromValue() methods from the client are replaced with implicit casting, see PropertyValue.cs for more details
-
-        public static NetMessageSetProperty ToNetMessageSetProperty(ulong replicationId, PropertyId propertyId, PropertyValue value)
-        {
-            PropertyInfo info = GameDatabase.PropertyInfoTable.LookupPropertyInfo(propertyId.Enum);
-            return NetMessageSetProperty.CreateBuilder()
-                .SetReplicationId(replicationId)
-                .SetPropertyId(propertyId.Raw.ReverseBits())    // In NetMessageSetProperty all bits are reversed rather than bytes
-                .SetValueBits(PropertyCollection.ConvertValueToBits(value, info.DataType))
-                .Build();
-        }
-
-        public static NetMessageRemoveProperty ToNetMessageRemoveProperty(ulong replicationId, PropertyId propertyId)
-        {
-            return NetMessageRemoveProperty.CreateBuilder()
-                .SetReplicationId(replicationId)
-                .SetPropertyId(propertyId.Raw.ReverseBits())
-                .Build();
-        }
     }
 }

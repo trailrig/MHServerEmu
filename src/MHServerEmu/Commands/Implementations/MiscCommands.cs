@@ -5,8 +5,11 @@ using MHServerEmu.Frontend;
 using MHServerEmu.Games;
 using MHServerEmu.Games.Entities;
 using MHServerEmu.Games.Entities.Avatars;
+using MHServerEmu.Games.Events;
+using MHServerEmu.Games.Events.LegacyImplementations;
 using MHServerEmu.Games.GameData;
 using MHServerEmu.Games.Network;
+using MHServerEmu.Games.Powers;
 using MHServerEmu.Games.Regions;
 
 namespace MHServerEmu.Commands.Implementations
@@ -65,8 +68,9 @@ namespace MHServerEmu.Commands.Implementations
 
             CommandHelper.TryGetPlayerConnection(client, out PlayerConnection playerConnection, out Game game);
 
-            var avatar = (AvatarPrototypeId)playerConnection.Player.CurrentAvatar.BaseData.PrototypeId;
-            switch (avatar)
+            Avatar avatar = playerConnection.Player.CurrentAvatar;
+            var avatarPrototypeId = (AvatarPrototypeId)avatar.PrototypeDataRef;
+            switch (avatarPrototypeId)
             {
                 case AvatarPrototypeId.BlackPanther:
                 case AvatarPrototypeId.BlackWidow:
@@ -81,10 +85,25 @@ namespace MHServerEmu.Commands.Implementations
                 case AvatarPrototypeId.Storm:
                 case AvatarPrototypeId.Thing:
                 case AvatarPrototypeId.Thor:
-                    game.EventManager.AddEvent(playerConnection, Games.Events.EventEnum.EmoteDance, 0, avatar);
-                    return $"{avatar} begins to dance";
+                    const PrototypeId dancePowerRef = (PrototypeId)773103106671775187;  // Powers/Emotes/EmoteDance.prototype
+
+                    if (playerConnection.IsUsingNewPowerMessageHandler)
+                    {
+                        Power dancePower = avatar.GetPower(dancePowerRef);
+                        if (dancePower == null) return "Dance power is not assigned to the current avatar.";
+
+                        PowerActivationSettings settings = new(avatar.Id, avatar.RegionLocation.Position, avatar.RegionLocation.Position);
+                        settings.Flags = PowerActivationSettingsFlags.NotifyOwner;
+                        avatar.ActivatePower(dancePowerRef, ref settings);
+                    }
+                    else
+                    {
+                        avatar.TEMP_SendActivatePowerMessage(dancePowerRef);  
+                    }
+
+                    return $"{avatarPrototypeId} begins to dance";
                 default:
-                    return $"{avatar} doesn't want to dance";
+                    return $"{avatarPrototypeId} doesn't want to dance";
             }
 
         }
@@ -128,7 +147,10 @@ namespace MHServerEmu.Commands.Implementations
             if (@params.Length < 3)
                 teleportPoint += playerConnection.LastPosition;
 
-            game.EventManager.AddEvent(playerConnection, Games.Events.EventEnum.ToTeleport, 0, teleportPoint);
+            EventPointer<OLD_ToTeleportEvent> eventPointer = new();
+            game.GameEventScheduler.ScheduleEvent(eventPointer, TimeSpan.Zero);
+            eventPointer.Get().Initialize(playerConnection, teleportPoint);
+
             return $"Teleporting to {teleportPoint.ToStringNames()}.";
         }
     }
